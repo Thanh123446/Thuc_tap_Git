@@ -1,0 +1,1688 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <!-- 1. KIỂM TRA ĐĂNG NHẬP BẮT BUỘC (AUTH GUARD) -->
+    <script>
+        const currentUser = JSON.parse(localStorage.getItem('user'));
+        const authToken = localStorage.getItem('auth_token');
+        if (!currentUser || !authToken) {
+            window.location.href = '/login';
+        }
+    </script>
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hệ Thống AI Bản Đồ Nông Nghiệp</title>
+
+    <!-- FontAwesome Icons & Leaflet CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <style>
+        :root {
+            --primary-color: #1b5e20;
+            --primary-light: #2e7d32;
+            --bg-color: #f4f6f9;
+            --border-color: #e0e0e0;
+            --panel-bg: #ffffff;
+            --surface-bg: #f8f9fa;
+            --message-bg: #f1f3f4;
+            --text-color: #263238;
+            --muted-color: #64748b;
+            --shadow-color: rgba(0, 0, 0, 0.12);
+        }
+
+        body[data-theme="dark"] {
+            --bg-color: #111827;
+            --border-color: #374151;
+            --panel-bg: #1f2937;
+            --surface-bg: #273449;
+            --message-bg: #374151;
+            --text-color: #e5e7eb;
+            --muted-color: #cbd5e1;
+            --shadow-color: rgba(0, 0, 0, 0.35);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            transition: background-color 0.2s, color 0.2s;
+        }
+
+        /* Top Header Bar */
+        .header-bar {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+
+        .header-title {
+            font-size: 18px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .user-menu {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .btn-header {
+            background: rgba(255, 255, 255, 0.15);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: 0.2s;
+        }
+
+        .btn-header:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .btn-logout {
+            background: #d32f2f;
+            border: none;
+        }
+
+        .btn-logout:hover {
+            background: #b71c1c;
+        }
+
+        /* Layout Container */
+        .app-container {
+            display: flex;
+            flex: 1;
+            height: calc(100vh - 53px);
+            position: relative;
+            min-height: 0;
+        }
+
+        .map-stage {
+            flex: 1;
+            height: 100%;
+            min-width: 0;
+            position: relative;
+        }
+
+        /* Leaflet Map */
+        #map {
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        .farm-overview,
+        .crop-legend {
+            position: absolute;
+            z-index: 500;
+            width: min(300px, calc(100% - 90px));
+            color: var(--text-color);
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            box-shadow: 0 4px 18px var(--shadow-color);
+            transition: width 0.2s, padding 0.2s;
+        }
+
+        .farm-overview {
+            top: 14px;
+            left: 60px;
+            padding: 14px;
+        }
+
+        .overview-title,
+        .legend-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        .panel-toggle {
+            justify-content: space-between;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            text-align: left;
+            cursor: pointer;
+        }
+
+        .panel-toggle-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .panel-toggle-chevron {
+            color: var(--muted-color);
+            font-size: 12px;
+            transition: transform 0.2s;
+        }
+
+        .farm-overview.is-collapsed,
+        .crop-legend.is-collapsed {
+            width: min(180px, calc(100% - 76px));
+            padding: 7px 9px;
+        }
+
+        .is-collapsed .overview-title,
+        .is-collapsed .legend-title,
+        .is-collapsed .panel-toggle {
+            font-size: 11px;
+        }
+
+        .is-collapsed .panel-toggle-chevron {
+            transform: rotate(-90deg);
+        }
+
+        .panel-content[hidden] {
+            display: none;
+        }
+
+        .overview-title i,
+        .legend-title i {
+            color: var(--primary-light);
+        }
+
+        .overview-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 7px;
+            margin: 12px 0;
+        }
+
+        .overview-metric {
+            min-width: 0;
+            padding: 8px 6px;
+            background: var(--surface-bg);
+            border-radius: 8px;
+        }
+
+        .overview-metric strong {
+            display: block;
+            overflow: hidden;
+            font-size: 15px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .overview-metric span {
+            display: block;
+            margin-top: 3px;
+            color: var(--muted-color);
+            font-size: 10px;
+        }
+
+        .chart-heading {
+            margin: 2px 0 8px;
+            color: var(--muted-color);
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .chart-row {
+            display: grid;
+            grid-template-columns: minmax(60px, 82px) 1fr auto;
+            align-items: center;
+            gap: 7px;
+            margin-top: 7px;
+            font-size: 11px;
+        }
+
+        .chart-label {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .chart-track {
+            height: 8px;
+            overflow: hidden;
+            background: var(--surface-bg);
+            border-radius: 99px;
+        }
+
+        .chart-bar {
+            height: 100%;
+            min-width: 3px;
+            border-radius: inherit;
+        }
+
+        .chart-count {
+            color: var(--muted-color);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .report-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 12px;
+        }
+
+        .report-button {
+            flex: 1 1 110px;
+            padding: 7px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 7px;
+            background: var(--surface-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .report-button:hover {
+            border-color: var(--primary-light);
+        }
+
+        .farm-alerts {
+            margin-top: 12px;
+            padding: 9px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--surface-bg);
+            font-size: 11px;
+        }
+
+        .farm-alerts h3 {
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        .alert-list {
+            display: grid;
+            gap: 5px;
+            max-height: 130px;
+            overflow-y: auto;
+        }
+
+        .farm-alert {
+            padding: 6px 7px;
+            border-left: 3px solid #f59e0b;
+            border-radius: 4px;
+            background: rgba(245, 158, 11, 0.1);
+            line-height: 1.35;
+        }
+
+        .farm-alert.alert-error {
+            border-left-color: #ef4444;
+            background: rgba(239, 68, 68, 0.1);
+        }
+
+        .farm-alert.alert-info {
+            border-left-color: #3b82f6;
+            background: rgba(59, 130, 246, 0.1);
+        }
+
+        .alert-threshold-note {
+            margin-top: 7px;
+            color: var(--muted-color);
+            font-size: 10px;
+            line-height: 1.4;
+        }
+
+        .crop-legend {
+            bottom: 28px;
+            left: 10px;
+            max-height: 35%;
+            padding: 12px;
+            overflow: auto;
+        }
+
+        .legend-title {
+            margin-bottom: 8px;
+        }
+
+        .legend-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            text-align: left;
+        }
+
+        .legend-table th {
+            color: var(--muted-color);
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        .legend-table th,
+        .legend-table td {
+            padding: 5px 3px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .legend-table tr:last-child td {
+            border-bottom: 0;
+        }
+
+        .legend-crop {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            max-width: 150px;
+        }
+
+        .legend-swatch {
+            flex: 0 0 10px;
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+        }
+
+        .legend-crop-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .crop-filter-button {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            max-width: 155px;
+            padding: 2px 4px;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            text-align: left;
+        }
+
+        .crop-filter-button:hover,
+        .crop-filter-button[aria-pressed="true"] {
+            border-color: var(--primary-light);
+            background: var(--surface-bg);
+        }
+
+        .crop-filter-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 5px;
+            margin-bottom: 6px;
+            color: var(--muted-color);
+            font-size: 10px;
+        }
+
+        .clear-crop-filter {
+            padding: 3px 5px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--panel-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            font-size: 10px;
+        }
+
+        .legend-empty,
+        .chart-empty {
+            padding: 6px 0;
+            color: var(--muted-color);
+            font-size: 11px;
+        }
+
+        /* Chat Panel Sidebar */
+        .chat-panel {
+            width: clamp(360px, 32vw, 520px);
+            flex: 0 0 clamp(360px, 32vw, 520px);
+            background: var(--panel-bg);
+            border-left: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            z-index: 2;
+            box-shadow: -2px 0 10px var(--shadow-color);
+            min-height: 0;
+        }
+
+        .chat-resizer {
+            width: 6px;
+            flex: 0 0 6px;
+            cursor: col-resize;
+            background: transparent;
+            transition: background 0.2s;
+        }
+
+        .chat-resizer:hover,
+        .chat-resizer.is-dragging {
+            background: var(--primary-light);
+        }
+
+        .chat-header {
+            padding: 11px 12px;
+            background: var(--surface-bg);
+            border-bottom: 1px solid var(--border-color);
+            font-weight: bold;
+            color: var(--primary-color);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 12px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+
+        .message {
+            max-width: 94%;
+            padding: 8px 11px;
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.4;
+            word-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: #e8f5e9;
+            color: #1b5e20;
+            border-bottom-right-radius: 2px;
+        }
+
+        .message.bot {
+            align-self: flex-start;
+            background: var(--message-bg);
+            color: var(--text-color);
+            border-bottom-left-radius: 2px;
+        }
+
+        .message-image {
+            display: block;
+            max-width: 100%;
+            max-height: 180px;
+            margin-bottom: 6px;
+            border-radius: 7px;
+            object-fit: contain;
+        }
+
+        /* Image Preview Area */
+        .image-preview-container {
+            padding: 6px 12px;
+            display: none;
+            align-items: center;
+            gap: 10px;
+            background: var(--surface-bg);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .image-preview-container img {
+            height: 50px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+
+        .btn-remove-img {
+            color: red;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        /* Chat Input Box */
+        .chat-input-container {
+            padding: 8px;
+            border-top: 1px solid var(--border-color);
+            background: var(--panel-bg);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .chat-input-container input[type="text"] {
+            flex: 1;
+            min-width: 0;
+            padding: 8px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            outline: none;
+            background: var(--panel-bg);
+            color: var(--text-color);
+            font-size: 13px;
+        }
+
+        .btn-attach-image {
+            display: inline-flex;
+            flex: 0 0 auto;
+            align-items: center;
+            gap: 5px;
+            padding: 7px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .btn-icon {
+            background: none;
+            border: none;
+            color: var(--muted-color);
+            font-size: 16px;
+            cursor: pointer;
+            padding: 7px;
+            border-radius: 50%;
+            transition: 0.2s;
+        }
+
+        .btn-icon.btn-attach-image {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+        }
+
+        .btn-icon:hover {
+            background: var(--surface-bg);
+            color: var(--primary-color);
+        }
+
+        .btn-send {
+            flex: 0 0 34px;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: 0.2s;
+        }
+
+        .btn-send:hover {
+            background: var(--primary-light);
+        }
+
+        /* Loading Spinner */
+        .typing-indicator {
+            display: none;
+            align-self: flex-start;
+            font-size: 12px;
+            color: var(--muted-color);
+            font-style: italic;
+            padding: 0 12px 6px;
+        }
+
+        .message-sources {
+            display: block;
+            margin-top: 9px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border-color);
+            color: var(--muted-color);
+            font-size: 11px;
+        }
+
+        .message-sources a {
+            color: var(--primary-light);
+            text-decoration: none;
+            word-break: break-word;
+        }
+
+        .message-sources a:hover { text-decoration: underline; }
+
+        body[data-theme="dark"] .message.user {
+            background: #14532d;
+            color: #dcfce7;
+        }
+
+        body[data-theme="dark"] .chat-header {
+            color: #86efac;
+        }
+
+        body[data-theme="dark"] .overview-title i,
+        body[data-theme="dark"] .legend-title i {
+            color: #86efac;
+        }
+
+        @media (max-width: 760px) {
+            .header-bar {
+                padding: 8px 12px;
+            }
+
+            .header-title {
+                font-size: 15px;
+            }
+
+            .user-menu {
+                gap: 7px;
+                font-size: 12px;
+            }
+
+            .btn-header {
+                padding: 6px 8px;
+                font-size: 11px;
+            }
+
+            .chat-panel {
+                width: 100%;
+                flex-basis: 100%;
+            }
+
+            .chat-resizer {
+                display: none;
+            }
+
+            .chat-header {
+                padding: 10px;
+                font-size: 12px;
+            }
+
+            .farm-overview {
+                width: min(270px, calc(100% - 76px));
+                padding: 10px;
+            }
+
+            .farm-overview.is-collapsed,
+            .crop-legend.is-collapsed {
+                width: min(180px, calc(100% - 68px));
+                padding: 7px 9px;
+            }
+
+            .crop-legend {
+                max-height: 30%;
+            }
+        }
+
+        @media (max-width: 560px) {
+            .header-bar {
+                gap: 8px;
+            }
+
+            .header-title {
+                max-width: 40%;
+                font-size: 13px;
+            }
+
+            .user-menu {
+                gap: 5px;
+            }
+
+            .user-menu > span {
+                display: none;
+            }
+
+            .header-button-label,
+            #themeToggle span {
+                display: none;
+            }
+
+            .btn-header {
+                padding: 6px;
+            }
+
+            .app-container {
+                flex-direction: column;
+                height: auto;
+            }
+
+            .map-stage {
+                flex: 1 1 68%;
+                min-height: 0;
+            }
+
+            .chat-panel {
+                width: 100%;
+                height: 32%;
+                flex: 0 0 32%;
+                border-top: 1px solid var(--border-color);
+                border-left: 0;
+            }
+
+            .farm-overview {
+                top: 10px;
+                left: 54px;
+                width: min(260px, calc(100% - 68px));
+            }
+
+            .crop-legend {
+                bottom: 22px;
+                left: 8px;
+                max-height: 32%;
+                width: min(270px, calc(100% - 16px));
+            }
+        }
+    </style>
+</head>
+<body data-theme="light">
+
+    <!-- Header Bar -->
+    <div class="header-bar">
+        <div class="header-title">
+            <i class="fa-solid fa-map-location-dot"></i>
+            <span>Hệ Thống AI Bản Đồ Nông Nghiệp</span>
+        </div>
+        <div class="user-menu">
+            <span><i class="fa-solid fa-circle-user"></i> Xin chào, <b id="displayUsername">User</b></span>
+
+            <button class="btn-header" id="themeToggle" type="button" onclick="toggleTheme()" aria-label="Chuyển sang giao diện tối">
+                <i class="fa-solid fa-moon" aria-hidden="true"></i> <span>Giao diện tối</span>
+            </button>
+            
+            <!-- Nút Quản trị Admin (chỉ hiển thị nếu tài khoản là Admin) -->
+            <a href="/admin" id="btnAdminPage" class="btn-header" style="display: none;">
+                <i class="fa-solid fa-user-shield"></i> <span class="header-button-label">Trang Admin</span>
+            </a>
+
+            <button class="btn-header" type="button" onclick="handleChangePassword()">
+                <i class="fa-solid fa-key"></i> <span class="header-button-label">Đổi mật khẩu</span>
+            </button>
+            <button class="btn-header btn-danger-account" type="button" onclick="handleDeleteAccount()">
+                <i class="fa-solid fa-user-xmark"></i> <span class="header-button-label">Xóa tài khoản</span>
+            </button>
+
+            <button class="btn-header btn-logout" onclick="handleLogout()">
+                <i class="fa-solid fa-right-from-bracket"></i> <span class="header-button-label">Đăng xuất</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Main Container -->
+    <div class="app-container">
+        <!-- Interactive Leaflet Map -->
+        <div class="map-stage">
+            <div id="map"></div>
+
+            <section class="farm-overview is-collapsed" id="farmOverview" aria-labelledby="overviewTitle">
+                <h2 class="overview-title">
+                    <button class="panel-toggle" id="overviewToggle" type="button" aria-expanded="false" aria-controls="overviewContent" onclick="togglePanel('farmOverview', 'overviewContent', 'overviewToggle')">
+                        <span class="panel-toggle-label" id="overviewTitle">
+                            <i class="fa-solid fa-chart-pie" aria-hidden="true"></i>
+                            Tổng quan nông trại
+                        </span>
+                        <i class="fa-solid fa-chevron-down panel-toggle-chevron" aria-hidden="true"></i>
+                    </button>
+                </h2>
+                <div class="panel-content" id="overviewContent" hidden>
+                    <div class="overview-metrics">
+                        <div class="overview-metric">
+                            <strong id="totalParcels">—</strong>
+                            <span>Thửa đất</span>
+                        </div>
+                        <div class="overview-metric">
+                            <strong id="totalArea">—</strong>
+                            <span>Tổng diện tích</span>
+                        </div>
+                        <div class="overview-metric">
+                            <strong id="cropTypeCount">—</strong>
+                            <span>Loại nông sản</span>
+                        </div>
+                    </div>
+                    <h3 class="chart-heading">Số thửa theo loại nông sản</h3>
+                    <div id="cropChart" role="img" aria-label="Biểu đồ số thửa theo từng loại nông sản">
+                        <p class="chart-empty">Đang tải dữ liệu nông trại...</p>
+                    </div>
+                    <div class="report-actions" aria-label="Xuất báo cáo nông trại">
+                        <button class="report-button" type="button" onclick="exportFarmReport('csv')">
+                            <i class="fa-solid fa-file-excel" aria-hidden="true"></i> Xuất Excel (CSV)
+                        </button>
+                        <button class="report-button" type="button" onclick="exportFarmReport('pdf')">
+                            <i class="fa-solid fa-file-pdf" aria-hidden="true"></i> In / lưu PDF
+                        </button>
+                    </div>
+                    <section class="farm-alerts" aria-labelledby="alertsTitle">
+                        <h3 id="alertsTitle"><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i> Cảnh báo nông trại</h3>
+                        <div class="alert-list" id="farmAlertList" aria-live="polite">
+                            <p class="chart-empty">Đang kiểm tra dữ liệu...</p>
+                        </div>
+                        <p class="alert-threshold-note">Ngưỡng tham khảo chung: độ ẩm &lt; 30% hoặc &gt; 80%; nhiệt độ &lt; 10°C hoặc &gt; 35°C. Nên điều chỉnh theo từng loại cây.</p>
+                    </section>
+                </div>
+            </section>
+
+            <section class="crop-legend is-collapsed" id="cropLegend" aria-labelledby="legendTitle">
+                <h2 class="legend-title">
+                    <button class="panel-toggle" id="legendToggle" type="button" aria-expanded="false" aria-controls="legendContent" onclick="togglePanel('cropLegend', 'legendContent', 'legendToggle')">
+                        <span class="panel-toggle-label" id="legendTitle">
+                            <i class="fa-solid fa-seedling" aria-hidden="true"></i>
+                            Phân loại nông sản
+                        </span>
+                        <i class="fa-solid fa-chevron-down panel-toggle-chevron" aria-hidden="true"></i>
+                    </button>
+                </h2>
+                <div class="panel-content" id="legendContent" hidden>
+                    <div class="crop-filter-controls">
+                        <span id="cropFilterStatus">Đang hiển thị mọi thửa</span>
+                        <button class="clear-crop-filter" id="clearCropFilter" type="button" onclick="clearCropFilter()" hidden>Hiển thị tất cả</button>
+                    </div>
+                    <div id="cropLegendBody">
+                        <p class="legend-empty">Đang tải danh sách...</p>
+                    </div>
+                    <p class="alert-threshold-note">Chọn một loại cây để làm nổi bật các thửa trên bản đồ.</p>
+                </div>
+            </section>
+        </div>
+
+        <!-- AI Chatbot Sidebar -->
+        <div class="chat-resizer" id="chatResizer" role="separator" aria-label="Điều chỉnh độ rộng khung chat" aria-orientation="vertical"></div>
+        <div class="chat-panel" id="chatPanel">
+            <div class="chat-header">
+                <i class="fa-solid fa-robot"></i> Trợ Lý AI Nông Nghiệp (Gemini)
+            </div>
+
+            <div class="chat-messages" id="chatMessages">
+                <div class="message bot">
+                    Xin chào! Tôi là Trợ lý AI Bản đồ Nông nghiệp. Bạn có thể hỏi tôi về thông tin thửa đất, diện tích, thời tiết hoặc giá nông sản!
+                </div>
+            </div>
+
+            <div class="typing-indicator" id="typingIndicator">
+                <i class="fa-solid fa-spinner fa-spin"></i> AI đang suy nghĩ...
+            </div>
+
+            <!-- Pre-view ảnh đính kèm -->
+            <div class="image-preview-container" id="imagePreviewContainer">
+                <img id="imagePreview" src="" alt="Preview">
+                <i class="fa-solid fa-circle-xmark btn-remove-img" onclick="removeSelectedImage()"></i>
+            </div>
+
+            <!-- Input Chat Form -->
+            <div class="chat-input-container">
+                <input type="file" id="imageInput" accept="image/*" style="display: none;" onchange="handleImageSelect(event)">
+                <button class="btn-icon btn-attach-image" type="button" onclick="document.getElementById('imageInput').click()" title="Chọn ảnh để hỏi AI" aria-label="Chọn ảnh để hỏi AI">
+                    <i class="fa-solid fa-image" aria-hidden="true"></i>
+                    <span>Ảnh</span>
+                </button>
+                <input type="text" id="chatInput" placeholder="Nhập câu hỏi..." onkeypress="handleKeyPress(event)">
+                <button class="btn-send" onclick="sendMessage()">
+                    <i class="fa-solid fa-paper-plane"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/auth.js"></script>
+    <script src="/script.js"></script>
+
+    <script>
+        let currentBase64Image = null;
+        let conversationContext = [];
+        const conversationStorageKey = `agri_chat_context_${currentUser ? currentUser.id : 'guest'}`;
+        const cropColors = new Map();
+        const cropColorPalette = [
+            '#16a34a', '#f97316', '#2563eb', '#a855f7', '#eab308',
+            '#06b6d4', '#e11d48', '#84cc16', '#9333ea', '#0f766e'
+        ];
+        const areaFormatter = new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 0 });
+        const alertThresholds = { minMoisture: 30, maxMoisture: 80, minTemperature: 10, maxTemperature: 35 };
+        let farmFeatures = [];
+        let activeCropFilter = null;
+
+        function initChatResizer() {
+            const resizer = document.getElementById('chatResizer');
+            const panel = document.getElementById('chatPanel');
+            const layout = document.querySelector('.app-container');
+            if (!resizer || !panel || !layout) return;
+            const savedWidth = Number(localStorage.getItem('agri_chat_width'));
+            if (savedWidth >= 320 && savedWidth <= 700 && window.innerWidth > 760) {
+                panel.style.width = `${savedWidth}px`;
+                panel.style.flexBasis = `${savedWidth}px`;
+            }
+            let dragging = false;
+            resizer.addEventListener('pointerdown', event => {
+                if (window.innerWidth <= 760) return;
+                dragging = true;
+                resizer.classList.add('is-dragging');
+                resizer.setPointerCapture(event.pointerId);
+                document.body.style.userSelect = 'none';
+            });
+            resizer.addEventListener('pointermove', event => {
+                if (!dragging) return;
+                const width = Math.max(320, Math.min(700, window.innerWidth - event.clientX));
+                panel.style.width = `${width}px`;
+                panel.style.flexBasis = `${width}px`;
+            });
+            const stopDragging = event => {
+                if (!dragging) return;
+                dragging = false;
+                resizer.classList.remove('is-dragging');
+                if (event.pointerId !== undefined) {
+                    try { resizer.releasePointerCapture(event.pointerId); } catch (_) {}
+                }
+                document.body.style.userSelect = '';
+                localStorage.setItem('agri_chat_width', String(panel.getBoundingClientRect().width));
+            };
+            resizer.addEventListener('pointerup', stopDragging);
+            resizer.addEventListener('pointercancel', stopDragging);
+        }
+
+        function applyTheme(theme) {
+            const activeTheme = theme === 'dark' ? 'dark' : 'light';
+            document.body.dataset.theme = activeTheme;
+
+            const button = document.getElementById('themeToggle');
+            if (!button) return;
+
+            const isDark = activeTheme === 'dark';
+            button.setAttribute('aria-label', isDark ? 'Chuyển sang giao diện sáng' : 'Chuyển sang giao diện tối');
+            button.innerHTML = isDark
+                ? '<i class="fa-solid fa-sun" aria-hidden="true"></i> <span>Giao diện sáng</span>'
+                : '<i class="fa-solid fa-moon" aria-hidden="true"></i> <span>Giao diện tối</span>';
+        }
+
+        function toggleTheme() {
+            const nextTheme = document.body.dataset.theme === 'dark' ? 'light' : 'dark';
+            localStorage.setItem('agri_theme', nextTheme);
+            applyTheme(nextTheme);
+        }
+
+        function togglePanel(panelId, contentId, buttonId) {
+            const panel = document.getElementById(panelId);
+            const content = document.getElementById(contentId);
+            const button = document.getElementById(buttonId);
+            const isExpanded = button.getAttribute('aria-expanded') === 'true';
+
+            panel.classList.toggle('is-collapsed', isExpanded);
+            content.hidden = isExpanded;
+            button.setAttribute('aria-expanded', String(!isExpanded));
+        }
+
+        // 1. Hiển thị thông tin người dùng từ localStorage
+        document.addEventListener('DOMContentLoaded', () => {
+            applyTheme(localStorage.getItem('agri_theme') || 'light');
+            initChatResizer();
+            if (currentUser) {
+                document.getElementById('displayUsername').innerText = currentUser.full_name || currentUser.username;
+                if (currentUser.role === 'admin') {
+                    document.getElementById('btnAdminPage').style.display = 'inline-flex';
+                }
+            }
+            restoreConversationContext();
+            initMap();
+        });
+
+        // 2. Khởi tạo Bản đồ Leaflet Map
+        // map, geojsonLayer, objectsLayer đã được khai báo trong script.js
+        let lastSelectedParcelIds = [];
+
+        function restoreConversationContext() {
+            const storedContext = sessionStorage.getItem(conversationStorageKey);
+            if (!storedContext) return;
+
+            try {
+                const parsedContext = JSON.parse(storedContext);
+                if (!Array.isArray(parsedContext)) {
+                    throw new TypeError('Lịch sử hội thoại phải là một mảng.');
+                }
+                conversationContext = parsedContext
+                    .filter(turn =>
+                        turn &&
+                        (turn.role === 'user' || turn.role === 'assistant') &&
+                        typeof turn.content === 'string'
+                    )
+                    .map(turn => ({
+                        role: turn.role,
+                        content: turn.content,
+                        parcel_ids: Array.isArray(turn.parcel_ids)
+                            ? turn.parcel_ids.filter(id => typeof id === 'string').slice(0, 20)
+                            : []
+                    }))
+                    .slice(-12);
+                if (conversationContext.length) {
+                    document.getElementById('chatMessages').textContent = '';
+                    conversationContext.forEach(turn => appendMessage(turn.content, turn.role === 'user' ? 'user' : 'bot'));
+                    const lastAssistantTurn = [...conversationContext].reverse().find(turn => turn.role === 'assistant');
+                    if (lastAssistantTurn) lastSelectedParcelIds = lastAssistantTurn.parcel_ids;
+                }
+            } catch (error) {
+                console.error('Không thể khôi phục ngữ cảnh chat:', error);
+                sessionStorage.removeItem(conversationStorageKey);
+            }
+        }
+
+        function saveConversationContext() {
+            conversationContext = conversationContext.slice(-12);
+            sessionStorage.setItem(conversationStorageKey, JSON.stringify(conversationContext));
+        }
+
+        function getColorByCrop(type) {
+            const cropName = String(type || 'Chưa phân loại').trim();
+            return cropColors.get(cropName) || '#64748b';
+        }
+
+        function getCropName(properties) {
+            const crop = properties.cay_trong || properties.loai_nong_san || properties.loai_dat || properties.loai;
+            return crop ? String(crop).trim() : 'Chưa phân loại';
+        }
+
+        function getFeatureProperties(feature) {
+            return feature && feature.properties ? feature.properties : {};
+        }
+
+        function getFeatureArea(properties) {
+            const value = Number(properties.dien_tich ?? properties.area_sqm ?? 0);
+            return Number.isFinite(value) && value > 0 ? value : 0;
+        }
+
+        function getFeatureWarnings(feature) {
+            const properties = getFeatureProperties(feature);
+            const parcelName = properties.ten || properties.name || properties.id || properties.parcel_code || 'Thửa đất';
+            const warnings = [];
+            const moistureValue = properties.do_am ?? properties.moisture ?? properties.humidity ?? properties.do_am_pct;
+            const temperatureValue = properties.nhiet_do ?? properties.temperature ?? properties.temp;
+
+            if (moistureValue !== null && moistureValue !== undefined && moistureValue !== '') {
+                const moisture = Number(moistureValue);
+                if (Number.isFinite(moisture) && moisture < alertThresholds.minMoisture) {
+                    warnings.push(`${parcelName}: độ ẩm thấp (${moisture}%).`);
+                } else if (Number.isFinite(moisture) && moisture > alertThresholds.maxMoisture) {
+                    warnings.push(`${parcelName}: độ ẩm cao (${moisture}%).`);
+                }
+            }
+
+            if (temperatureValue !== null && temperatureValue !== undefined && temperatureValue !== '') {
+                const temperature = Number(temperatureValue);
+                if (Number.isFinite(temperature) && temperature < alertThresholds.minTemperature) {
+                    warnings.push(`${parcelName}: nhiệt độ thấp (${temperature}°C).`);
+                } else if (Number.isFinite(temperature) && temperature > alertThresholds.maxTemperature) {
+                    warnings.push(`${parcelName}: nhiệt độ cao (${temperature}°C).`);
+                }
+            }
+            return warnings;
+        }
+
+        function getFarmWarnings(features = farmFeatures) {
+            return (Array.isArray(features) ? features : []).flatMap(getFeatureWarnings);
+        }
+
+        function renderFarmAlerts(features) {
+            const alertList = document.getElementById('farmAlertList');
+            const warnings = getFarmWarnings(features);
+            alertList.replaceChildren();
+
+            if (!warnings.length) {
+                alertList.appendChild(createTextElement('p', 'farm-alert alert-info', 'Chưa phát hiện độ ẩm hoặc nhiệt độ vượt ngưỡng tham khảo.'));
+            } else {
+                warnings.forEach(warning => {
+                    alertList.appendChild(createTextElement('p', 'farm-alert alert-error', warning));
+                });
+            }
+
+            alertList.appendChild(createTextElement(
+                'p',
+                'farm-alert alert-info',
+                'Chưa có dữ liệu dự báo thời tiết được tích hợp; cảnh báo thời tiết chưa khả dụng.'
+            ));
+        }
+
+        function escapeHTML(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            })[character]);
+        }
+
+        function getReportRows() {
+            return farmFeatures.map(feature => {
+                const properties = getFeatureProperties(feature);
+                return {
+                    code: properties.id || properties.parcel_code || '',
+                    name: properties.ten || properties.name || '',
+                    crop: getCropName(properties),
+                    area: getFeatureArea(properties),
+                    moisture: properties.do_am ?? properties.moisture ?? properties.humidity ?? '',
+                    temperature: properties.nhiet_do ?? properties.temperature ?? properties.temp ?? '',
+                    warnings: getFeatureWarnings(feature).join(' ')
+                };
+            });
+        }
+
+        function exportFarmReport(format) {
+            const rows = getReportRows();
+            if (rows.length === 0) {
+                window.alert('Chưa có dữ liệu thửa đất để xuất báo cáo.');
+                return;
+            }
+
+            const headers = ['Mã thửa', 'Tên thửa', 'Nông sản', 'Diện tích (m²)', 'Độ ẩm (%)', 'Nhiệt độ (°C)', 'Cảnh báo'];
+            const reportDate = new Date().toLocaleString('vi-VN');
+            if (format === 'csv') {
+                const csvCell = (value, untrustedText = false) => {
+                    let text = String(value ?? '');
+                    if (untrustedText && /^[\s]*[=+\-@]/.test(text)) text = `'${text}`;
+                    return `"${text.replace(/"/g, '""')}"`;
+                };
+                const csv = [headers, ...rows.map(row => [
+                    row.code, row.name, row.crop, row.area, row.moisture, row.temperature, row.warnings
+                ])].map((row, rowIndex) => row.map((value, columnIndex) =>
+                    csvCell(value, rowIndex > 0 && ![3, 4, 5].includes(columnIndex))
+                ).join(',')).join('\r\n');
+                const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `bao-cao-nong-trai-${new Date().toISOString().slice(0, 10)}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+                return;
+            }
+
+            if (format === 'pdf') {
+                const reportWindow = window.open('', '_blank');
+                if (!reportWindow) {
+                    window.alert('Trình duyệt đã chặn cửa sổ báo cáo. Hãy cho phép cửa sổ bật lên rồi thử lại.');
+                    return;
+                }
+
+                const bodyRows = rows.map(row => `<tr><td>${escapeHTML(row.code)}</td><td>${escapeHTML(row.name)}</td><td>${escapeHTML(row.crop)}</td><td>${escapeHTML(areaFormatter.format(row.area))}</td><td>${escapeHTML(row.moisture)}</td><td>${escapeHTML(row.temperature)}</td><td>${escapeHTML(row.warnings || '—')}</td></tr>`).join('');
+                const warningSummary = getFarmWarnings().length
+                    ? getFarmWarnings().map(escapeHTML).join('<br>')
+                    : 'Chưa phát hiện độ ẩm hoặc nhiệt độ vượt ngưỡng tham khảo.';
+                reportWindow.onload = () => reportWindow.print();
+                reportWindow.document.write(`<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><title>Báo cáo nông trại</title><style>body{font:13px Arial,sans-serif;color:#17212b;margin:24px}h1{color:#1b5e20}p{line-height:1.5}.summary{margin:16px 0;padding:12px;background:#f2f7f2;border-radius:8px}table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:7px;border:1px solid #cbd5e1;text-align:left;vertical-align:top}th{background:#e8f5e9}td:nth-child(4),td:nth-child(5),td:nth-child(6){white-space:nowrap}@media print{body{margin:10mm}button{display:none}}</style></head><body><h1>Báo cáo nông trại</h1><p>Thời gian xuất: ${escapeHTML(reportDate)}</p><div class="summary"><strong>Tổng số thửa:</strong> ${escapeHTML(areaFormatter.format(rows.length))}<br><strong>Tổng diện tích:</strong> ${escapeHTML(areaFormatter.format(rows.reduce((sum, row) => sum + row.area, 0)))} m²<br><strong>Cảnh báo:</strong><br>${warningSummary}<br><br><strong>Thời tiết:</strong> Chưa có dữ liệu dự báo được tích hợp.</div><table><thead><tr>${headers.map(header => `<th>${escapeHTML(header)}</th>`).join('')}</tr></thead><tbody>${bodyRows}</tbody></table></body></html>`);
+                reportWindow.document.close();
+                reportWindow.focus();
+                return;
+            }
+
+            throw new TypeError(`Định dạng báo cáo không được hỗ trợ: ${format}`);
+        }
+
+        function createTextElement(tagName, className, text) {
+            const element = document.createElement(tagName);
+            if (className) element.className = className;
+            element.textContent = text;
+            return element;
+        }
+
+        function renderFarmOverview(features) {
+            const cropStats = new Map();
+            let totalArea = 0;
+            const validFeatures = Array.isArray(features) ? features : [];
+            farmFeatures = validFeatures;
+
+            validFeatures.forEach(feature => {
+                const properties = getFeatureProperties(feature);
+                const cropName = getCropName(properties);
+                const area = getFeatureArea(properties);
+                const stats = cropStats.get(cropName) || { count: 0, area: 0 };
+                stats.count += 1;
+                stats.area += area;
+                totalArea += area;
+                cropStats.set(cropName, stats);
+            });
+
+            const sortedCrops = [...cropStats.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi'));
+            cropColors.clear();
+            sortedCrops.forEach(([cropName], index) => {
+                const color = cropColorPalette[index] || `hsl(${Math.round(((index - cropColorPalette.length) * 137.508) % 360)} 72% 48%)`;
+                cropColors.set(cropName, color);
+            });
+
+            document.getElementById('totalParcels').textContent = areaFormatter.format(validFeatures.length);
+            document.getElementById('totalArea').textContent = `${areaFormatter.format(totalArea)} m²`;
+            document.getElementById('cropTypeCount').textContent = areaFormatter.format(sortedCrops.length);
+
+            const chart = document.getElementById('cropChart');
+            chart.replaceChildren();
+            if (sortedCrops.length === 0) {
+                chart.appendChild(createTextElement('p', 'chart-empty', 'Chưa có dữ liệu nông trại.'));
+            } else {
+                const maxCount = Math.max(...sortedCrops.map(([, stats]) => stats.count));
+                sortedCrops
+                    .slice()
+                    .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0], 'vi'))
+                    .forEach(([cropName, stats]) => {
+                        const row = document.createElement('div');
+                        row.className = 'chart-row';
+                        row.appendChild(createTextElement('span', 'chart-label', cropName));
+
+                        const track = document.createElement('div');
+                        track.className = 'chart-track';
+                        const bar = document.createElement('div');
+                        bar.className = 'chart-bar';
+                        bar.style.width = `${Math.max(5, (stats.count / maxCount) * 100)}%`;
+                        bar.style.backgroundColor = cropColors.get(cropName);
+                        track.appendChild(bar);
+                        row.appendChild(track);
+                        row.appendChild(createTextElement('span', 'chart-count', `${stats.count} thửa`));
+                        chart.appendChild(row);
+                    });
+            }
+
+            const legendBody = document.getElementById('cropLegendBody');
+            legendBody.replaceChildren();
+            if (sortedCrops.length === 0) {
+                legendBody.appendChild(createTextElement('p', 'legend-empty', 'Chưa có dữ liệu nông sản.'));
+                renderFarmAlerts(validFeatures);
+                updateCropFilterControls();
+                return;
+            }
+
+            const table = document.createElement('table');
+            table.className = 'legend-table';
+            const head = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            ['Nông sản', 'Thửa', 'Diện tích'].forEach(label => {
+                headerRow.appendChild(createTextElement('th', '', label));
+            });
+            head.appendChild(headerRow);
+            table.appendChild(head);
+
+            const body = document.createElement('tbody');
+            sortedCrops.forEach(([cropName, stats]) => {
+                const row = document.createElement('tr');
+                const cropCell = document.createElement('td');
+                const cropButton = document.createElement('button');
+                cropButton.className = 'crop-filter-button';
+                cropButton.type = 'button';
+                cropButton.setAttribute('aria-pressed', String(activeCropFilter === cropName));
+                cropButton.title = `Làm nổi bật các thửa trồng ${cropName}`;
+                cropButton.addEventListener('click', () => selectCropFilter(cropName));
+                const swatch = document.createElement('span');
+                swatch.className = 'legend-swatch';
+                swatch.style.backgroundColor = cropColors.get(cropName);
+                swatch.setAttribute('aria-hidden', 'true');
+                cropButton.append(swatch, createTextElement('span', 'legend-crop-name', cropName));
+                cropCell.appendChild(cropButton);
+                row.append(
+                    cropCell,
+                    createTextElement('td', '', areaFormatter.format(stats.count)),
+                    createTextElement('td', '', `${areaFormatter.format(stats.area)} m²`)
+                );
+                body.appendChild(row);
+            });
+            table.appendChild(body);
+            legendBody.appendChild(table);
+            renderFarmAlerts(validFeatures);
+            updateCropFilterControls();
+        }
+
+        function updateCropFilterControls() {
+            const status = document.getElementById('cropFilterStatus');
+            const clearButton = document.getElementById('clearCropFilter');
+            status.textContent = activeCropFilter
+                ? `Đang lọc: ${activeCropFilter}`
+                : 'Đang hiển thị mọi thửa';
+            clearButton.hidden = !activeCropFilter;
+            document.querySelectorAll('.crop-filter-button').forEach(button => {
+                const cropName = button.title.replace('Làm nổi bật các thửa trồng ', '');
+                button.setAttribute('aria-pressed', String(cropName === activeCropFilter));
+            });
+        }
+
+        function selectCropFilter(cropName) {
+            activeCropFilter = activeCropFilter === cropName ? null : cropName;
+            updateCropFilterControls();
+            applyMapHighlights();
+        }
+
+        function clearCropFilter() {
+            activeCropFilter = null;
+            updateCropFilterControls();
+            applyMapHighlights();
+        }
+
+        async function loadGeoJSONToMap() {
+            try {
+                const response = await apiFetch('/api/parcels/geojson');
+                if (!response.ok) {
+                    throw new Error(`Không thể tải dữ liệu bản đồ (HTTP ${response.status}).`);
+                }
+
+                const geojsonData = await response.json();
+                if (!geojsonData || !Array.isArray(geojsonData.features)) {
+                    throw new TypeError('Dữ liệu bản đồ không đúng định dạng GeoJSON FeatureCollection.');
+                }
+                renderFarmOverview(geojsonData.features);
+                if (geojsonLayer) map.removeLayer(geojsonLayer);
+
+                geojsonLayer = L.geoJSON(geojsonData, {
+                    style: function(feature) {
+                        const props = feature.properties || {};
+                        const fillColor = getColorByCrop(getCropName(props));
+                        return {
+                            color: fillColor,
+                            weight: 2,
+                            fillColor: fillColor,
+                            fillOpacity: 0.55
+                        };
+                    },
+                    pointToLayer: function(feature, latlng) {
+                        const fillColor = getColorByCrop(getCropName(feature.properties || {}));
+                        return L.circleMarker(latlng, {
+                            radius: 7,
+                            color: fillColor,
+                            weight: 2,
+                            fillColor,
+                            fillOpacity: 0.9
+                        });
+                    },
+                    onEachFeature: function(feature, layer) {
+                        const props = feature.properties || {};
+                        const rows = Object.keys(props)
+                            .map(key => `<b>${escapeHTML(key)}:</b> ${escapeHTML(props[key])}`)
+                            .join('<br>');
+                        layer.bindPopup(`<div style="font-size: 13px;"><b>THÔNG TIN ĐỐI TƯỢNG</b><hr style="margin: 4px 0;">${rows}</div>`);
+                    }
+                }).addTo(map);
+
+                if (geojsonLayer.getBounds().isValid()) {
+                    map.fitBounds(geojsonLayer.getBounds(), { padding: [20, 20], maxZoom: 17 });
+                }
+                highlightParcels(lastSelectedParcelIds, false);
+            } catch (error) {
+                console.error("Lỗi nạp bản đồ:", error);
+                document.getElementById('totalParcels').textContent = '—';
+                document.getElementById('totalArea').textContent = '—';
+                document.getElementById('cropTypeCount').textContent = '—';
+                document.getElementById('cropChart').replaceChildren(
+                    createTextElement('p', 'chart-empty', 'Không thể tải dữ liệu nông trại.')
+                );
+                document.getElementById('cropLegendBody').replaceChildren(
+                    createTextElement('p', 'legend-empty', 'Không thể tải danh sách nông sản.')
+                );
+            }
+        }
+
+        function highlightParcels(parcelIds, focusMap = true) {
+            if (!Array.isArray(parcelIds)) return;
+            lastSelectedParcelIds = parcelIds;
+            applyMapHighlights(focusMap);
+        }
+
+        function applyMapHighlights(focusMap = true) {
+            if (!geojsonLayer) return;
+            const selectedIds = new Set(lastSelectedParcelIds.map(id => String(id).trim().toLocaleLowerCase()));
+            const aiSelectedLayers = [];
+            const cropSelectedLayers = [];
+            geojsonLayer.eachLayer(layer => {
+                const feature = layer.feature || {};
+                const properties = feature.properties || {};
+                const parcelId = properties.id || properties.parcel_code || properties.ten;
+                const isPolygon = feature.geometry &&
+                    ['Polygon', 'MultiPolygon'].includes(feature.geometry.type);
+                const isCropMatch = activeCropFilter && getCropName(properties) === activeCropFilter;
+                if (activeCropFilter) {
+                    if (isCropMatch) {
+                        layer.setStyle({
+                            color: cropColors.get(activeCropFilter),
+                            weight: 4,
+                            fillColor: cropColors.get(activeCropFilter),
+                            fillOpacity: 0.85,
+                            opacity: 1
+                        });
+                        if (isPolygon) cropSelectedLayers.push(layer);
+                    } else {
+                        layer.setStyle({ fillOpacity: 0.08, opacity: 0.2, weight: 1 });
+                    }
+                } else if (
+                    parcelId &&
+                    selectedIds.has(String(parcelId).trim().toLocaleLowerCase()) &&
+                    isPolygon
+                ) {
+                    layer.setStyle({
+                        color: '#facc15',
+                        weight: 4,
+                        fillColor: '#facc15',
+                        fillOpacity: 0.75
+                    });
+                    aiSelectedLayers.push(layer);
+                } else {
+                    geojsonLayer.resetStyle(layer);
+                }
+            });
+
+            const focusLayers = activeCropFilter ? cropSelectedLayers : aiSelectedLayers;
+            if (focusMap && focusLayers.length) {
+                const bounds = L.featureGroup(focusLayers).getBounds();
+                if (bounds.isValid()) {
+                    map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+                }
+            }
+        }
+
+        function initMap() {
+            // Tọa độ mặc định (Mặt bằng chung)
+            map = L.map('map').setView([19.974, 105.954], 17);
+
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 19,
+                attribution: 'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+            }).addTo(map);
+
+            loadGeoJSONToMap();
+            loadObjectsToMap();
+        }
+
+        // 3. Xử lý đổi mật khẩu và xóa tài khoản
+        async function handleChangePassword() {
+            const currentPassword = prompt("Nhập mật khẩu hiện tại:");
+            if (currentPassword === null) return;
+            const newPassword = prompt("Nhập mật khẩu mới (ít nhất 12 ký tự):");
+            if (newPassword === null) return;
+            const confirmPassword = prompt("Nhập lại mật khẩu mới:");
+            if (confirmPassword === null) return;
+
+            const response = await apiFetch('/api/change-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword })
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                alert(result.detail || 'Không thể đổi mật khẩu.');
+                return;
+            }
+            alert(result.message || 'Đổi mật khẩu thành công. Vui lòng đăng nhập lại.');
+            localStorage.removeItem('user');
+            localStorage.removeItem('auth_token');
+            window.location.href = '/login';
+        }
+
+        async function handleDeleteAccount() {
+            if (!confirm("Xóa tài khoản sẽ xóa vĩnh viễn lịch sử chat, nhật ký và log lỗi của bạn. Bạn có chắc chắn không?")) return;
+            const currentPassword = prompt("Nhập mật khẩu hiện tại để xác nhận xóa tài khoản:");
+            if (currentPassword === null) return;
+
+            const response = await apiFetch('/api/account', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ current_password: currentPassword })
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                alert(result.detail || 'Không thể xóa tài khoản.');
+                return;
+            }
+            localStorage.removeItem('user');
+            localStorage.removeItem('auth_token');
+            localStorage.removeItem('chat_sessions');
+            alert(result.message || 'Tài khoản đã được xóa.');
+            window.location.href = '/login';
+        }
+
+        // 4. Xử lý đăng xuất
+        function handleLogout() {
+            if (confirm("Bạn có chắc chắn muốn đăng xuất khỏi hệ thống?")) {
+                localStorage.removeItem('user');
+                localStorage.removeItem('auth_token');
+                window.location.href = '/login';
+            }
+        }
+
+        // 5. Xử lý đính kèm ảnh
+        // MAX_CHAT_IMAGE_BYTES đã được khai báo trong script.js
+
+        function handleImageSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                if (!file.type.startsWith('image/')) {
+                    alert('Vui lòng chọn tệp hình ảnh hợp lệ.');
+                    event.target.value = '';
+                    return;
+                }
+                if (file.size > MAX_CHAT_IMAGE_BYTES) {
+                    alert('Ảnh không được vượt quá 5 MB.');
+                    event.target.value = '';
+                    return;
+                }
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    currentBase64Image = e.target.result;
+                    document.getElementById('imagePreview').src = currentBase64Image;
+                    document.getElementById('imagePreviewContainer').style.display = 'flex';
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        function removeSelectedImage() {
+            currentBase64Image = null;
+            document.getElementById('imageInput').value = '';
+            document.getElementById('imagePreviewContainer').style.display = 'none';
+        }
+
+        // 5. Gửi tin nhắn Chat tới API FastAPI
+        async function sendMessage() {
+            const inputEl = document.getElementById('chatInput');
+            const userText = inputEl.value.trim();
+
+            if (!userText && !currentBase64Image) return;
+
+            // Hiển thị tin nhắn User trên khung Chat
+            appendMessage(userText || "Phân tích hình ảnh này", 'user', currentBase64Image);
+            inputEl.value = '';
+
+            const payload = {
+                message: userText || "Phân tích hình ảnh này",
+                user_id: currentUser ? currentUser.id : null,
+                image_base64: currentBase64Image,
+                history: conversationContext.slice(-12)
+            };
+
+            // Dọn dẹp preview ảnh sau khi bấm gửi
+            removeSelectedImage();
+
+            // Hiển thị hiệu ứng loading AI
+            showTyping(true);
+
+            try {
+                const response = await apiFetch('/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+                showTyping(false);
+
+                if (response.ok) {
+                    appendMessage(data.reply, 'bot', null, data.sources);
+                    const parcelIds = Array.isArray(data.parcel_ids) ? data.parcel_ids : [];
+                    lastSelectedParcelIds = parcelIds;
+                    conversationContext.push(
+                        { role: 'user', content: userText || '[Hình ảnh]', parcel_ids: [] },
+                        { role: 'assistant', content: data.reply, parcel_ids: parcelIds }
+                    );
+                    saveConversationContext();
+                    highlightParcels(parcelIds);
+                } else {
+                    const errorMessage = data.detail || data.reply || "Yêu cầu AI thất bại.";
+                    appendMessage(`Lỗi AI (${response.status}): ${errorMessage}`, 'bot');
+                }
+            } catch (error) {
+                showTyping(false);
+                console.error("Lỗi gửi chat:", error);
+                appendMessage("Không thể kết nối đến server!", 'bot');
+            }
+        }
+
+        function appendMessage(text, sender, imageBase64 = null, sources = []) {
+            const container = document.getElementById('chatMessages');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${sender}`;
+            if (imageBase64) {
+                const image = document.createElement('img');
+                image.className = 'message-image';
+                image.src = imageBase64;
+                image.alt = 'Hình ảnh đính kèm trong câu hỏi';
+                msgDiv.appendChild(image);
+            }
+            if (text) {
+                const textNode = document.createElement('span');
+                textNode.textContent = text;
+                msgDiv.appendChild(textNode);
+            }
+            if (sender === 'bot' && Array.isArray(sources) && sources.length) {
+                const sourcesEl = document.createElement('div');
+                sourcesEl.className = 'message-sources';
+                const title = document.createElement('strong');
+                title.textContent = 'Nguồn tham khảo';
+                sourcesEl.appendChild(title);
+                sources.slice(0, 5).forEach(source => {
+                    const row = document.createElement('div');
+                    const link = document.createElement('a');
+                    link.href = source.url;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = source.title || source.url;
+                    row.appendChild(link);
+                    if (source.accessed_at) {
+                        row.appendChild(document.createTextNode(` — truy cập ${source.accessed_at}`));
+                    }
+                    sourcesEl.appendChild(row);
+                });
+                msgDiv.appendChild(sourcesEl);
+            }
+            container.appendChild(msgDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function showTyping(isTyping) {
+            document.getElementById('typingIndicator').style.display = isTyping ? 'block' : 'none';
+        }
+
+        function handleKeyPress(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        }
+    </script>
+</body>
+</html>

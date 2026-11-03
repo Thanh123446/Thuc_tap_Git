@@ -1,0 +1,57 @@
+.env
+.env.*
+!.env.example
+
+# Python virtual environments and generated files
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Automated test files and test suites (not needed to run the application)
+test/
+tests/
+test_*
+*_test.*
+*.test.*
+*.spec.*
+
+# Local server and application logs
+*.log
+*.log.*
+/nhat_ky_ai.txt
+
+# Local database files and backups
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+
+# Temporary debugging and verification scripts
+/_check_*.py
+/_debug_*.py
+/_test_api*.py
+/_final_verify.py
+/_find_ids.py
+/_fix_seed.py
+/_reset_db.py
+/_verify*.py
+
+# Other generated dependencies and build output
+node_modules/
+/build/
+
+# Operating system and editor temporary files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
