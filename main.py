@@ -293,6 +293,7 @@ from gis_service import (
     load_data,
     load_geojson_features,
     loc_thua as gis_loc_thua, 
+    thong_tin_thua as gis_thong_tin_thua,
     thua_cuc_tri as gis_thua_cuc_tri, 
     tinh_tong_dien_tich as gis_tinh_tong_dien_tich,
     thua_gan as gis_thua_gan, 
@@ -302,6 +303,9 @@ from gis_service import (
 
 logger = logging.getLogger("MAIN_LOGGER")
 logger.setLevel(logging.INFO)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
+logger.propagate = False
 
 def parcel_to_feature(parcel: models.Parcel) -> dict:
     return {
@@ -738,6 +742,10 @@ def tool_loc_thua(
 
 def tool_thua_cuc_tri(truong: str = "dien_tich", loai: str = "max") -> str:
     return json.dumps(gis_thua_cuc_tri(truong=truong, loai=loai), ensure_ascii=False)
+
+def tool_thong_tin_thua(ma_thua: str) -> str:
+    """Tra cứu thuộc tính của một thửa theo mã hoặc số thửa."""
+    return json.dumps(gis_thong_tin_thua(ma_thua), ensure_ascii=False)
 
 def tool_tinh_tong_dien_tich(
     dieu_kien: Optional[str] = None,
@@ -1322,7 +1330,10 @@ def tool_web_search(query: str) -> str:
     """Tra cứu web, ưu tiên endpoint chính thức đã cấu hình rồi fallback sang tìm kiếm web."""
     return json.dumps(_perform_web_search(query), ensure_ascii=False)
 
-GEMINI_REQUEST_TIMEOUT_SECONDS = 45
+GEMINI_REQUEST_TIMEOUT_SECONDS = max(
+    1,
+    int(os.environ.get("GEMINI_REQUEST_TIMEOUT_SECONDS", "10")),
+)
 GEMINI_MODEL_REQUEST_TIMEOUT_SECONDS = max(
     1,
     int(os.environ.get(
@@ -1330,8 +1341,14 @@ GEMINI_MODEL_REQUEST_TIMEOUT_SECONDS = max(
         str(GEMINI_REQUEST_TIMEOUT_SECONDS),
     )),
 )
-GEMINI_HTTP_TIMEOUT_MILLISECONDS = 45_000
-GEMINI_SDK_RETRY_ATTEMPTS = max(1, int(os.environ.get("GEMINI_SDK_RETRY_ATTEMPTS", "2")))
+GEMINI_HTTP_TIMEOUT_MILLISECONDS = max(
+    1_000,
+    int(os.environ.get(
+        "GEMINI_HTTP_TIMEOUT_MILLISECONDS",
+        str(GEMINI_REQUEST_TIMEOUT_SECONDS * 1_000),
+    )),
+)
+GEMINI_SDK_RETRY_ATTEMPTS = max(1, int(os.environ.get("GEMINI_SDK_RETRY_ATTEMPTS", "1")))
 MAX_GEMINI_IMAGE_BYTES = 5 * 1024 * 1024
 ALLOWED_GEMINI_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
@@ -1541,14 +1558,16 @@ NHIỆM VỤ VÀ QUY TẮC CỐT LÕI:
 WEB LOOKUP RULES: For current weather, crop prices, news, regulations, latest information, or facts outside the GIS dataset, call `tool_web_search`. It prioritizes configured official sources and falls back to web search. Use only returned source-backed facts. Every web-derived answer must include a "Nguồn tham khảo" section with source title, URL, and access time. Never invent URLs. If no valid source is returned, clearly say that reliable information could not be verified.
 
 1. KHÔNG TỰ BỊA ĐẶT SỐ LIỆU: Mọi thông tin về tên thửa, độ ẩm, diện tích, nhiệt độ, cây trồng PHẢI được lấy từ các công cụ (tools) được cung cấp. Tuyệt đối không tự ước đoán số liệu.
+1a. Khi người dùng hỏi thông tin của một thửa đất cụ thể, gọi `tool_thong_tin_thua` với mã hoặc số thửa; không tự đoán thuộc tính.
 2. KHÔNG TỰ TÍNH TOÁN TRONG ĐẦU: Nếu người dùng hỏi tổng diện tích, bạn BẮT BUỘC phải gọi hàm `tool_tinh_tong_dien_tich`. Hãy cộng theo diện tích đã lưu trong dữ liệu của từng thửa, không tính lại diện tích từ hình học. Nếu người dùng nêu rõ mã/tên các thửa (ví dụ T1 và T2 hoặc Thửa 1 và Thửa 2), truyền từng mã/tên vào `danh_sach_thua`. Nếu người dùng chỉ nêu số lượng (ví dụ "2 thửa") mà không xác định đó là thửa nào, hãy hỏi lại người dùng; không tự chọn thửa.
-3. CÂU HỎI NGOÀI PHẠM VI HOẶC MƠ HỒ: Nếu người dùng hỏi các câu hỏi cảm tính, mơ hồ không có trong dữ liệu (ví dụ: "thửa nào đẹp nhất?", "giá lúa hôm nay?"), hãy lịch sự trả lời rằng: "Dữ liệu nông trại hiện tại chưa có thông tin về tiêu chí này. Hệ thống hiện chỉ quản lý các thông số kỹ thuật gồm loại cây trồng, diện tích, độ ẩm, nhiệt độ và khoảng cách vị trí."
+3. CÂU HỎI NGOÀI PHẠM VI HOẶC MƠ HỒ: Với câu hỏi cảm tính không có tiêu chí đo lường (ví dụ: "thửa nào đẹp nhất?"), hãy hỏi người dùng tiêu chí cụ thể hoặc giải thích dữ liệu hiện có. Với dữ liệu hiện thời ngoài GIS như giá nông sản, thời tiết, tin tức hay quy định, hãy dùng `tool_web_search` theo WEB LOOKUP RULES; không từ chối chỉ vì dữ liệu đó không nằm trong GIS.
 4. PHONG CÁCH TRẢ LỜI: Ngắn gọn, thân thiện, chính xác, có định dạng rõ ràng (sử dụng icon phù hợp như 🌾, 💧, 📐, 🌡️, 🏠).
 5. NHỚ NGỮ CẢNH: Khi có lịch sử hội thoại trong ngữ cảnh hiện tại, hãy dùng các kết quả đó để trả lời câu hỏi nối tiếp. Không suy đoán ngữ cảnh nếu lịch sử không được cung cấp.
 6. Khi người dùng hỏi vị trí hoặc tọa độ của một đối tượng như giếng/nhà kho, bắt buộc gọi `tool_tim_vi_tri_doi_tuong`; không tự đoán vị trí.
 7. Với câu hỏi có nhiều điều kiện (ví dụ cây trồng, ngưỡng độ ẩm và khoảng cách tới mốc), gọi `tool_loc_thua` một lần và truyền đủ điều kiện; các điều kiện được áp dụng đồng thời.
 8. Khi công cụ trả về `parcel_ids`, hãy nêu đúng các thửa đó trong câu trả lời; API sẽ dùng các ID này để chọn thửa trên bản đồ.
 9. Chỉ dùng dữ liệu do công cụ trả về; không hiển thị JSON thô. Nếu công cụ không có dữ liệu phù hợp, hãy nói rõ rằng chưa tìm thấy dữ liệu.
+10. YÊU CẦU NHIỀU Ý: Tách câu hỏi thành tất cả các ý người dùng yêu cầu và trả lời từng ý, không dừng sau ý đầu tiên. Gọi mọi công cụ cần thiết (kể cả nhiều lần cùng một công cụ với điều kiện khác nhau), rồi tổng hợp kết quả trong một câu trả lời có từng mục rõ ràng. Nếu một ý không thể xác minh hoặc không có dữ liệu, nêu rõ riêng ý đó thay vì bỏ qua.
 """
 
 def build_ai_tool_registry() -> list[types.FunctionDeclaration]:
@@ -1566,6 +1585,7 @@ AI_TOOL_FUNCTIONS = {
     for fn in (
         tool_loc_thua,
         tool_thua_cuc_tri,
+        tool_thong_tin_thua,
         tool_tinh_tong_dien_tich,
         tool_thua_gan,
         tool_khoang_cach,
@@ -1587,8 +1607,8 @@ ai_config = types.GenerateContentConfig(
 )
 
 
-MAX_GEMINI_TOOL_ROUNDS = 2
-MAX_GEMINI_TOOL_CALLS_PER_ROUND = 3
+MAX_GEMINI_TOOL_ROUNDS = 4
+MAX_GEMINI_TOOL_CALLS_PER_ROUND = 8
 MAX_GEMINI_TOOL_RESULT_CHARS = 8_000
 MAX_GEMINI_PARCEL_IDS = 20
 MAX_WEB_SOURCES_IN_REPLY = 5
@@ -1779,8 +1799,14 @@ async def _send_gemini_message(
                     executed_tool_signatures.add(call_signature)
                     function_arguments = _validate_tool_arguments(function, function_arguments)
                     tool_started = time.perf_counter()
+                    tool_timeout = deadline - asyncio.get_running_loop().time()
+                    if tool_timeout <= 0:
+                        raise TimeoutError("Gemini chat deadline expired before tool execution.")
                     result = _compact_tool_result(
-                        await asyncio.to_thread(function, **function_arguments)
+                        await asyncio.wait_for(
+                            asyncio.to_thread(function, **function_arguments),
+                            timeout=tool_timeout,
+                        )
                     )
                     logger.info(
                         "Gemini tool completed: tool=%s elapsed_ms=%.2f result_chars=%d",
@@ -1808,6 +1834,8 @@ async def _send_gemini_message(
                     tool_result = {"error": str(error.detail)}
                 except (TypeError, ValueError) as error:
                     tool_result = {"error": str(error)}
+                except TimeoutError:
+                    raise
                 except Exception:
                     logger.exception("Gemini tool execution failed: tool=%s", function_name)
                     tool_result = {"error": "Tool execution failed."}
@@ -1870,6 +1898,37 @@ def _format_direct_gis_result(result: dict, operation: str) -> tuple[str, list[s
     data = result.get("du_lieu", {})
     if not isinstance(data, dict):
         data = {}
+    if operation == "parcel":
+        def first_value(*keys):
+            return next(
+                (data[key] for key in keys if data.get(key) not in (None, "")),
+                None,
+            )
+
+        name = first_value("ten", "name") or (parcel_ids[0] if parcel_ids else "thửa đất")
+        lines = [f"🌾 Thông tin {name}:"]
+        parcel_id = first_value("id", "parcel_code") or (parcel_ids[0] if parcel_ids else None)
+        if parcel_id:
+            lines.append(f"- Mã thửa: {parcel_id}")
+        crop = first_value("cay_trong", "loai_nong_san", "crop_type")
+        if crop:
+            lines.append(f"- Cây trồng: {crop}")
+        area = first_value("dien_tich_m2", "dien_tich", "area_sqm")
+        if area not in (None, ""):
+            lines.append(f"- Diện tích: {area} m²")
+        humidity = first_value("do_am", "do_am_pct", "humidity")
+        if humidity not in (None, ""):
+            lines.append(f"- Độ ẩm: {humidity}%")
+        temperature = first_value("nhiet_do", "temperature")
+        if temperature not in (None, ""):
+            lines.append(f"- Nhiệt độ: {temperature}°C")
+        notes = first_value("ghi_chu", "notes", "mo_ta")
+        if notes:
+            lines.append(f"- Ghi chú: {notes}")
+        if len(lines) == 1:
+            lines.append("Chưa có thuộc tính chi tiết cho thửa đất này.")
+        return "\n".join(lines), parcel_ids
+
     label = data.get("ten") or data.get("name") or data.get("id", "thửa đất")
     field_labels = {
         "dien_tich_m2": "diện tích",
@@ -1914,7 +1973,7 @@ def _extract_direct_parcel_identifiers(message: str) -> list[str]:
     """
     normalized = clean_text(message)
     pattern = re.compile(
-        r"\b(?:t\s*\d+|thua(?:\s+dat)?(?:\s+so)?\s*#?\s*\d+)\b",
+        r"\b(?:t\s*\d+|thua(?:\s+dat)?(?:\s+so)?(?:\s+thu)?\s*#?\s*\d+)\b",
         flags=re.IGNORECASE,
     )
     raw_matches = [match.group(0).strip() for match in pattern.finditer(normalized)]
@@ -1940,11 +1999,87 @@ def _extract_direct_parcel_identifiers(message: str) -> list[str]:
     return matches
 
 
+def _direct_gis_intents(normalized: str) -> set[str]:
+    intents = set()
+    if any(marker in normalized for marker in ("thong tin", "chi tiet", "du lieu cua")):
+        intents.add("parcel")
+    if any(marker in normalized for marker in ("o dau", "vi tri", "toa do")):
+        intents.add("location")
+    if "khoang cach" in normalized:
+        intents.add("distance")
+    if "tong dien tich" in normalized:
+        intents.add("area")
+    if any(marker in normalized for marker in ("lon nhat", "nho nhat", "cao nhat", "thap nhat")) and any(
+        marker in normalized for marker in ("dien tich", "do am", "nhiet do")
+    ):
+        intents.add("extreme")
+    return intents
+
+
+def _requested_extreme_operations(normalized: str) -> list[tuple[str, str]]:
+    fields = [
+        (match.start(), field)
+        for marker, field in (
+            ("dien tich", "dien_tich"),
+            ("do am", "do_am"),
+            ("nhiet do", "nhiet_do"),
+        )
+        if (match := re.search(re.escape(marker), normalized))
+    ]
+    fields.sort()
+    directions = [
+        (match.start(), kind)
+        for pattern, kind in (
+            (r"\b(?:lon nhat|cao nhat)\b", "max"),
+            (r"\b(?:nho nhat|thap nhat)\b", "min"),
+        )
+        for match in re.finditer(pattern, normalized)
+    ]
+    if not fields or not directions:
+        return []
+
+    kinds = {kind for _, kind in directions}
+    if len(kinds) == 1:
+        kind = next(iter(kinds))
+        return [(field, kind) for _, field in fields]
+
+    associated_directions: list[list[str]] = [[] for _ in fields]
+    for direction_position, kind in directions:
+        field_index = next(
+            (
+                index
+                for index in range(len(fields) - 1, -1, -1)
+                if fields[index][0] <= direction_position
+            ),
+            0,
+        )
+        associated_directions[field_index].append(kind)
+
+    operations: list[tuple[str, str]] = []
+    for (_, field), associated in zip(fields, associated_directions):
+        if not associated:
+            return []
+        operations.extend((field, kind) for kind in dict.fromkeys(associated))
+    return operations
+
+
 def _try_direct_gis_chat(message: str) -> Optional[tuple[str, list[str]]]:
     """Handle unambiguous GIS questions without an unnecessary Gemini round-trip."""
     normalized = clean_text(message)
     if not normalized:
         return None
+
+    intents = _direct_gis_intents(normalized)
+    if len(intents) > 1:
+        return None
+
+    if any(marker in normalized for marker in ("thong tin", "chi tiet", "du lieu cua")):
+        identifiers = _extract_direct_parcel_identifiers(message)
+        if len(identifiers) == 1:
+            return _format_direct_gis_result(
+                gis_thong_tin_thua(identifiers[0]),
+                "parcel",
+            )
 
     if any(marker in normalized for marker in ("o dau", "vi tri", "toa do")):
         keyword = None
@@ -1969,19 +2104,296 @@ def _try_direct_gis_chat(message: str) -> Optional[tuple[str, list[str]]]:
             "area",
         )
 
-    if any(item in normalized for item in ("lon nhat", "nho nhat")) and any(
+    if any(item in normalized for item in ("lon nhat", "nho nhat", "cao nhat", "thap nhat")) and any(
         item in normalized for item in ("dien tich", "do am", "nhiet do")
     ):
-        field = (
-            "dien_tich"
-            if "dien tich" in normalized
-            else "do_am"
-            if "do am" in normalized
-            else "nhiet_do"
-        )
-        kind = "min" if "nho nhat" in normalized else "max"
-        return _format_direct_gis_result(gis_thua_cuc_tri(field, kind), "extreme")
+        requested_operations = _requested_extreme_operations(normalized)
+        if not requested_operations:
+            return None
+        results = [
+            _format_direct_gis_result(gis_thua_cuc_tri(field, kind), "extreme")
+            for field, kind in requested_operations
+        ]
+        reply = "\n".join(result[0] for result in results)
+        parcel_ids = list(dict.fromkeys(
+            parcel_id
+            for _, ids in results
+            for parcel_id in ids
+        ))[:MAX_GEMINI_PARCEL_IDS]
+        return reply, parcel_ids
     return None
+
+
+def _try_system_gis_chat(message: str) -> Optional[tuple[str, list[str]]]:
+    """Answer compound requests when Gemini is unavailable, using only supported GIS data."""
+    normalized = clean_text(message)
+    intents = _direct_gis_intents(normalized)
+    if len(intents) < 2:
+        return None
+
+    replies = []
+    parcel_ids = []
+
+    if "parcel" in intents:
+        identifiers = _extract_direct_parcel_identifiers(message)
+        if not identifiers:
+            return None
+        for identifier in identifiers:
+            result = gis_thong_tin_thua(identifier)
+            reply, ids = _format_direct_gis_result(result, "parcel")
+            replies.append(reply)
+            parcel_ids.extend(ids)
+
+    if "location" in intents:
+        if not any(marker in normalized for marker in ("gieng", "nha kho", "kho")):
+            return None
+        location_keywords = []
+        if "gieng" in normalized:
+            location_keywords.append("gieng")
+        if any(marker in normalized for marker in ("nha kho", "kho")):
+            location_keywords.append("nha kho")
+        for keyword in location_keywords:
+            result = gis_tim_vi_tri_doi_tuong(keyword)
+            reply, ids = _format_direct_gis_result(result, "location")
+            replies.append(reply)
+            parcel_ids.extend(ids)
+
+    if "distance" in intents:
+        distance_match = re.search(
+            r"(?:tu|giua)\s+(.+?)\s+(?:den|va)\s+(.+?)(?:\?|$)",
+            normalized,
+        )
+        if not distance_match:
+            return None
+        result = gis_khoang_cach(
+            distance_match.group(1).strip(),
+            distance_match.group(2).strip(),
+        )
+        reply, ids = _format_direct_gis_result(result, "distance")
+        replies.append(reply)
+        parcel_ids.extend(ids)
+
+    if "area" in intents:
+        result = gis_tinh_tong_dien_tich()
+        reply, ids = _format_direct_gis_result(result, "area")
+        replies.append(reply)
+        parcel_ids.extend(ids)
+
+    if "extreme" in intents:
+        requested_operations = _requested_extreme_operations(normalized)
+        if not requested_operations:
+            return None
+        for field, kind in requested_operations:
+            result = gis_thua_cuc_tri(field, kind)
+            reply, ids = _format_direct_gis_result(result, "extreme")
+            replies.append(reply)
+            parcel_ids.extend(ids)
+
+    return (
+        "\n".join(replies),
+        list(dict.fromkeys(parcel_ids))[:MAX_GEMINI_PARCEL_IDS],
+    )
+
+
+def _message_references_prior_context(message: str) -> bool:
+    normalized = clean_text(message)
+    return bool(
+        re.search(r"\b(?:con|vay|no|ay)\b", normalized)
+        or "thi sao" in normalized
+        or "the nao" in normalized
+        or any(
+            marker in normalized
+            for marker in (
+                "thua do",
+                "thua nay",
+                "thua ay",
+                "cua thua do",
+                "cua no",
+            )
+        )
+    )
+
+def _history_selected_parcel_ids(history: list["ChatTurn"]) -> list[str]:
+    return next(
+        (
+            turn.parcel_ids
+            for turn in reversed(history)
+            if turn.role == "assistant" and turn.parcel_ids
+        ),
+        [],
+    )
+
+
+def _try_contextual_gis_fallback(
+    message: str,
+    history: list["ChatTurn"],
+) -> Optional[tuple[str, list[str]]]:
+    """Resolve follow-up parcel questions from the prior assistant turn's selected parcels."""
+    normalized = clean_text(message)
+    if _extract_direct_parcel_identifiers(message):
+        return None
+    if not _message_references_prior_context(message):
+        return None
+
+    prior_parcel_ids = _history_selected_parcel_ids(history)
+    if not prior_parcel_ids:
+        return None
+
+    requested_text = normalized
+    if " cua " in normalized:
+        requested_text = normalized.split(" cua ", 1)[0]
+
+    requested_fields = []
+    if any(marker in requested_text for marker in ("dien tich", "rong bao nhieu")):
+        requested_fields.append(("Diện tích", ("dien_tich_m2", "dien_tich", "area_sqm"), "m²"))
+    if "do am" in requested_text:
+        requested_fields.append(("Độ ẩm", ("do_am", "do_am_pct", "humidity"), "%"))
+    if "nhiet do" in requested_text:
+        requested_fields.append(("Nhiệt độ", ("nhiet_do", "temperature"), "°C"))
+    if any(marker in requested_text for marker in ("cay trong", "loai cay", "trong cay gi")):
+        requested_fields.append(("Cây trồng", ("cay_trong", "loai_nong_san", "crop_type"), ""))
+
+    show_all = any(
+        marker in normalized
+        for marker in ("thong tin them", "chi tiet", "noi ro hon", "cac thong so")
+    )
+    if show_all:
+        requested_fields = [
+            ("Cây trồng", ("cay_trong", "loai_nong_san", "crop_type"), ""),
+            ("Diện tích", ("dien_tich_m2", "dien_tich", "area_sqm"), "m²"),
+            ("Độ ẩm", ("do_am", "do_am_pct", "humidity"), "%"),
+            ("Nhiệt độ", ("nhiet_do", "temperature"), "°C"),
+        ]
+
+    if not requested_fields:
+        selected = ", ".join(dict.fromkeys(prior_parcel_ids))
+        return (
+            f"Theo lượt trước, các thửa đang được nhắc đến là {selected}. "
+            "Bạn muốn xem diện tích, độ ẩm, nhiệt độ hay cây trồng của thửa nào?",
+            list(dict.fromkeys(prior_parcel_ids))[:MAX_GEMINI_PARCEL_IDS],
+        )
+
+    lines = []
+    selected_ids = []
+    for parcel_id in dict.fromkeys(prior_parcel_ids):
+        result = gis_thong_tin_thua(parcel_id)
+        data = result.get("du_lieu", {})
+        selected_ids.extend(result.get("parcel_ids", [parcel_id]))
+        parcel_name = data.get("ten") or data.get("name") or parcel_id
+        lines.append(f"🌾 Theo câu trước, {parcel_name} ({parcel_id}):")
+        for label, keys, unit in requested_fields:
+            value = next(
+                (data[key] for key in keys if data.get(key) not in (None, "")),
+                None,
+            )
+            if value is None:
+                value_text = "chưa có dữ liệu"
+            elif unit == "m²":
+                value_text = f"{value} {unit}"
+            else:
+                value_text = f"{value}{unit}"
+            lines.append(f"- {label}: {value_text}")
+
+    return (
+        "\n".join(lines),
+        list(dict.fromkeys(selected_ids))[:MAX_GEMINI_PARCEL_IDS],
+    )
+
+
+def _system_fallback_reply(
+    message: str,
+    *,
+    image_attached: bool,
+    history: Optional[list["ChatTurn"]] = None,
+) -> tuple[str, list[str]]:
+    warning = "⚠ Gemini hiện không khả dụng; hệ thống đang trả lời bằng chế độ dự phòng."
+    if image_attached:
+        return (
+            f"{warning}\nChế độ dự phòng không thể phân tích ảnh. "
+            "Vui lòng thử gửi lại khi Gemini hoạt động.",
+            [],
+        )
+
+    try:
+        contextual_result = _try_contextual_gis_fallback(message, history or [])
+    except HTTPException as error:
+        return (
+            f"{warning}\nTra cứu dữ liệu hội thoại trước chưa thành công: {error.detail}",
+            [],
+        )
+    if contextual_result:
+        reply, parcel_ids = contextual_result
+        return f"{warning}\n{reply}", parcel_ids
+
+    try:
+        direct_result = _try_direct_gis_chat(message)
+    except HTTPException as error:
+        return (
+            f"{warning}\nTra cứu dữ liệu nội bộ chưa thành công: {error.detail}",
+            [],
+        )
+    if direct_result:
+        reply, parcel_ids = direct_result
+        return f"{warning}\n{reply}", parcel_ids
+
+    try:
+        system_gis_result = _try_system_gis_chat(message)
+    except HTTPException as error:
+        return (
+            f"{warning}\nTra cứu dữ liệu nội bộ chưa thành công: {error.detail}",
+            [],
+        )
+    if system_gis_result:
+        reply, parcel_ids = system_gis_result
+        return f"{warning}\n{reply}", parcel_ids
+
+    return (
+        f"{warning}\nChế độ này chỉ tra cứu dữ liệu GIS có sẵn, "
+        "chưa thể trả lời câu hỏi kiến thức chung. Bạn có thể hỏi về thông tin "
+        "một thửa đất, tổng diện tích, vị trí giếng/nhà kho hoặc thửa có "
+        "diện tích, độ ẩm hay nhiệt độ cao nhất/thấp nhất.",
+        [],
+    )
+
+
+def _return_system_fallback(
+    background_tasks: BackgroundTasks,
+    *,
+    user_id: Optional[int],
+    user_message: str,
+    error_type: str,
+    error_message: str,
+    error_model: Optional[str] = None,
+    error_status: Optional[int] = None,
+    image_attached: bool = False,
+    history: Optional[list["ChatTurn"]] = None,
+) -> dict:
+    reply_text, parcel_ids = _system_fallback_reply(
+        user_message,
+        image_attached=image_attached,
+        history=history,
+    )
+    background_tasks.add_task(
+        persist_chat_result,
+        user_id=user_id,
+        user_message=user_message,
+        response=reply_text,
+        intent="SYSTEM_FALLBACK",
+        error={
+            "model": error_model,
+            "status_code": error_status,
+            "type": error_type,
+            "message": error_message,
+        },
+    )
+    return {
+        "reply": reply_text,
+        "parcel_ids": parcel_ids,
+        "sources": [],
+        "fallback": True,
+        "mode": "system",
+    }
+
 
 @app.post("/api/chat", summary="Chat AI Gemini có xử lý công cụ GIS")
 async def chat_endpoint(
@@ -1991,12 +2403,18 @@ async def chat_endpoint(
 ):
     user_id = current_user.id if current_user else None
 
-    if not request.image_base64:
+    has_contextual_parcel_followup = (
+        not request.image_base64
+        and _message_references_prior_context(request.message)
+        and bool(_history_selected_parcel_ids(request.history))
+    )
+    if not request.image_base64 and not has_contextual_parcel_followup:
         try:
             direct_result = _try_direct_gis_chat(request.message)
         except HTTPException:
             direct_result = None
         if direct_result:
+            logger.info("Chat request handled by direct GIS lookup; Gemini not called.")
             reply_text, parcel_ids = direct_result
             background_tasks.add_task(
                 persist_chat_result,
@@ -2008,18 +2426,16 @@ async def chat_endpoint(
             return {"reply": reply_text, "parcel_ids": parcel_ids}
 
     if client is None:
-        detail = "Backend chưa nhận được cấu hình GEMINI_API_KEY. Hãy đặt biến môi trường rồi khởi động lại server."
-        background_tasks.add_task(
-            persist_chat_result,
-            user_id=current_user.id if current_user else None,
+        logger.warning("Gemini request skipped: client is not configured.")
+        return _return_system_fallback(
+            background_tasks,
+            user_id=user_id,
             user_message=request.message,
-            response=detail,
-            intent="GEMINI_ERROR",
-            error={"type": "GeminiConfigurationError", "message": detail},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=detail,
+            error_type="GeminiConfigurationError",
+            error_message="Gemini client is not configured.",
+            error_status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            image_attached=bool(request.image_base64),
+            history=request.history,
         )
     
     contents = []
@@ -2086,6 +2502,7 @@ async def chat_endpoint(
                 last_error_model = model_name
                 break
             try:
+                logger.info("Gemini request started: model=%s", model_name)
                 chat_session = client.aio.chats.create(
                     model=model_name,
                     config=ai_config,
@@ -2095,6 +2512,11 @@ async def chat_endpoint(
                     chat_session,
                     contents,
                     model_deadline,
+                )
+                logger.info(
+                    "Gemini request completed: model=%s elapsed_seconds=%.2f",
+                    model_name,
+                    asyncio.get_running_loop().time() - request_started,
                 )
                 break
             except Exception as e:
@@ -2114,24 +2536,8 @@ async def chat_endpoint(
                     asyncio.get_running_loop().time() - request_started,
                 )
                 if last_error_status in (401, 403):
-                    detail = "Gemini từ chối API key hoặc quyền truy cập. Kiểm tra key, trạng thái key và quyền dùng Gemini API."
-                    background_tasks.add_task(
-                        persist_chat_result,
-                        user_id=current_user.id if current_user else None,
-                        user_message=request.message,
-                        response=detail,
-                        intent="GEMINI_ERROR",
-                        error={
-                            "model": model_name,
-                            "status_code": last_error_status,
-                            "type": last_error_type,
-                            "message": last_error_message,
-                        },
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail=detail,
-                    ) from e
+                    stop_fallback = True
+                    break
                 if isinstance(e, TimeoutError):
                     last_error_type = "TimeoutError"
                     last_error_message = str(e) or "Gemini request timed out."
@@ -2166,37 +2572,34 @@ async def chat_endpoint(
 
     if not reply_text:
         if last_error_status == 404:
-            detail = "Model Gemini không tồn tại hoặc không được bật cho key này. Kiểm tra GEMINI_MODEL và quyền truy cập model."
+            detail = "Model Gemini không tồn tại hoặc không được bật cho key này."
         elif last_error_status == 429:
-            detail = "Gemini đã vượt hạn mức hoặc giới hạn tốc độ của API key."
+            detail = "Gemini đã vượt hạn mức hoặc giới hạn tốc độ."
+        elif last_error_status in (401, 403):
+            detail = "Gemini từ chối API key hoặc quyền truy cập."
         elif last_error_status in (500, 502, 503, 504):
             detail = "Dịch vụ Gemini đang tạm thời gặp sự cố. Hãy thử lại sau."
         elif last_error_type == "TimeoutError":
-            detail = (
-                f"Gemini chưa phản hồi trong {GEMINI_REQUEST_TIMEOUT_SECONDS} giây. "
-                "Yêu cầu đã được dừng; hãy thử lại sau."
-            )
+            detail = f"Gemini chưa phản hồi trong {GEMINI_REQUEST_TIMEOUT_SECONDS} giây."
         else:
-            detail = "Không gọi được Gemini. Kiểm tra log backend để xem model và mã lỗi; API key không được ghi vào log."
-        background_tasks.add_task(
-            persist_chat_result,
+            detail = "Không gọi được Gemini; hệ thống sẽ thử chế độ dự phòng."
+        logger.warning(
+            "Gemini unavailable; using system fallback: model=%s status=%s error_type=%s",
+            last_error_model,
+            last_error_status or "unknown",
+            last_error_type or "GeminiRequestError",
+        )
+        return _return_system_fallback(
+            background_tasks,
             user_id=user_id,
             user_message=request.message,
-            response=detail,
-            intent="GEMINI_ERROR",
-            error={
-                "model": last_error_model,
-                "status_code": last_error_status,
-                "type": last_error_type or "GeminiRequestError",
-                "message": last_error_message or "Gemini không trả về phản hồi.",
-            },
+            error_type=last_error_type or "GeminiRequestError",
+            error_message=last_error_message or detail,
+            error_model=last_error_model,
+            error_status=last_error_status,
+            image_attached=bool(request.image_base64),
+            history=request.history,
         )
-        response_status = (
-            status.HTTP_504_GATEWAY_TIMEOUT
-            if last_error_type == "TimeoutError"
-            else status.HTTP_502_BAD_GATEWAY
-        )
-        raise HTTPException(status_code=response_status, detail=detail)
 
     background_tasks.add_task(
         persist_chat_result,

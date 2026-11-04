@@ -173,6 +173,48 @@ def _find_parcel_indices_by_identifier(
     return parcels.index[matches]
 
 
+def thong_tin_thua(identifier: str) -> dict:
+    """Return non-geometry attributes for one parcel selected by exact ID or ordinal."""
+    _, parcels = _require_gis_data()
+    normalized_identifier = clean_text(identifier or "")
+    if not normalized_identifier:
+        raise HTTPException(status_code=422, detail="Cần nhập mã hoặc số thửa đất.")
+
+    identifier_columns = [
+        column for column in ("id", "ten", "parcel_code", "name")
+        if column in parcels.columns
+    ]
+    if not identifier_columns:
+        raise HTTPException(
+            status_code=422,
+            detail="Dữ liệu thửa đất chưa có mã hoặc tên để tra cứu.",
+        )
+
+    matches = _find_parcel_indices_by_identifier(
+        parcels,
+        normalized_identifier,
+        identifier_columns,
+    )
+    if len(matches) == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Không tìm thấy thửa đất '{identifier}'.",
+        )
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Mã hoặc tên thửa '{identifier}' không duy nhất; hãy dùng mã thửa.",
+        )
+
+    index = matches[0]
+    row = parcels.loc[index]
+    data = row.drop(labels=["geometry", "_search_text"], errors="ignore").fillna("").to_dict()
+    return {
+        "parcel_ids": _parcel_ids(parcels.loc[[index]]),
+        "du_lieu": data,
+    }
+
+
 def _find_object_matches(objects: gpd.GeoDataFrame, keyword: str) -> gpd.GeoDataFrame:
     """Match object identity fields before falling back to descriptions."""
     identity_columns = [
@@ -555,5 +597,4 @@ def khoang_cach(dt1: str, dt2: str):
         "khoang_cach_met": round(distance, 2),
         "parcel_ids": parcel_ids,
     }
-
 
