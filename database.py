@@ -73,6 +73,40 @@ def migrate_chat_history_user_id():
         """))
 
 
+def migrate_parcels_user_id():
+    """Thêm cột user_id vào bảng parcels nếu chưa có."""
+    with engine.begin() as connection:
+        connection.execute(text("""
+            IF COL_LENGTH(N'dbo.parcels', N'user_id') IS NULL
+                ALTER TABLE dbo.parcels ADD user_id INT NULL;
+
+            IF OBJECT_ID(N'dbo.users', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                  SELECT 1
+                  FROM sys.foreign_keys
+                  WHERE name = N'FK_parcels_users_user_id'
+               )
+                ALTER TABLE dbo.parcels
+                ADD CONSTRAINT FK_parcels_users_user_id
+                FOREIGN KEY (user_id) REFERENCES dbo.users(id);
+        """))
+
+
+def migrate_user_location_cols():
+    """Thêm cột lưu vị trí GPS vào bảng users nếu chưa có."""
+    with engine.begin() as connection:
+        connection.execute(text("""
+            IF COL_LENGTH(N'dbo.users', N'latitude') IS NULL
+                ALTER TABLE dbo.users ADD latitude FLOAT NULL;
+
+            IF COL_LENGTH(N'dbo.users', N'longitude') IS NULL
+                ALTER TABLE dbo.users ADD longitude FLOAT NULL;
+
+            IF COL_LENGTH(N'dbo.users', N'location_updated_at') IS NULL
+                ALTER TABLE dbo.users ADD location_updated_at DATETIME NULL;
+        """))
+
+
 def migrate_unicode_text_columns() -> int:
     """Convert user-facing text fields to SQL Server Unicode storage."""
     column_lengths = {

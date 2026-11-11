@@ -17,7 +17,6 @@ htmlcov/
 
 # Automated test files and test suites (not needed to run the application)
 test/
-tests/
 test_*
 *_test.*
 *.test.*
@@ -55,3 +54,6 @@ Desktop.ini
 *.swp
 *.swo
 *~
+
+# Keep the maintained regression suite under version control.
+!tests/*.py

@@ -9,7 +9,7 @@ import logging
 import base64
 import asyncio
 import time
-import random
+
 import hmac
 import hashlib
 import secrets
@@ -34,12 +34,14 @@ if hasattr(sys.stdout, "reconfigure"):
 from passlib.context import CryptContext
 
 # Thư viện Web & API Framework
-from fastapi import BackgroundTasks, FastAPI, Depends, HTTPException, APIRouter, Header, status, Query
+from fastapi import BackgroundTasks, FastAPI, Depends, HTTPException, APIRouter, Header, status, Query, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
-import math as _math
+import math
 
 
 class SafeJSONResponse(JSONResponse):
@@ -52,13 +54,13 @@ class SafeJSONResponse(JSONResponse):
 def _json_dumps_safe(obj) -> str:
     def _default(o):
         if isinstance(o, float):
-            if _math.isnan(o) or _math.isinf(o):
+            if math.isnan(o) or math.isinf(o):
                 return None
         raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
     def _clean(value):
         if isinstance(value, float):
-            if _math.isnan(value) or _math.isinf(value):
+            if math.isnan(value) or math.isinf(value):
                 return None
             return value
         if isinstance(value, dict):
@@ -82,6 +84,8 @@ from database import (
     SessionLocal,
     migrate_chat_history_user_id,
     migrate_unicode_text_columns,
+    migrate_parcels_user_id,
+    migrate_user_location_cols,
 )
 import models
 import gis_service
@@ -307,19 +311,26 @@ if not logger.handlers:
     logger.addHandler(logging.StreamHandler())
 logger.propagate = False
 
-def parcel_to_feature(parcel: models.Parcel) -> dict:
+def parcel_to_feature(parcel: models.Parcel, include_user: bool = False) -> dict:
+    properties = {
+        "id": parcel.parcel_code,
+        "ten": parcel.name,
+        "cay_trong": parcel.crop_type,
+        "dien_tich": parcel.area_sqm,
+        "do_am": parcel.moisture,
+        "nhiet_do": parcel.temperature,
+        "ghi_chu": parcel.notes,
+        "db_id": parcel.id,
+    }
+    if parcel.user_id is not None:
+        properties["user_id"] = parcel.user_id
+    if include_user and parcel.user:
+        properties["user_full_name"] = parcel.user.full_name
+        properties["user_username"] = parcel.user.username
     return {
         "type": "Feature",
         "geometry": json.loads(parcel.geometry_geojson),
-        "properties": {
-            "id": parcel.parcel_code,
-            "ten": parcel.name,
-            "cay_trong": parcel.crop_type,
-            "dien_tich": parcel.area_sqm,
-            "do_am": parcel.moisture,
-            "nhiet_do": parcel.temperature,
-            "ghi_chu": parcel.notes,
-        },
+        "properties": properties,
     }
 
 
@@ -336,10 +347,29 @@ def refresh_gis_cache(db: Session) -> None:
     load_geojson_features(features)
 
 
-def parcel_feature_collection(db: Session) -> dict:
-    parcels = db.query(models.Parcel).order_by(models.Parcel.id.asc()).all()
+def get_user_parcel_codes(db: Session, user_id: int) -> list[str]:
+    """Lấy danh sách mã thửa đất thuộc về một user."""
+    parcels = db.query(models.Parcel).filter(models.Parcel.user_id == user_id).all()
+    return [p.parcel_code for p in parcels if p.parcel_code]
+
+
+def filter_parcel_ids_for_user(parcel_ids: list[str], user_parcel_codes: Optional[list[str]] = None) -> list[str]:
+    """Lọc danh sách parcel_ids chỉ giữ lại các thửa thuộc về user (nếu user_parcel_codes được cung cấp)."""
+    if user_parcel_codes is None:
+        return parcel_ids
+    allowed = set(c.strip().upper() for c in user_parcel_codes if c)
+    return [pid for pid in parcel_ids if str(pid).strip().upper() in allowed]
+
+
+def parcel_feature_collection(db: Session, current_user: Optional[models.User] = None) -> dict:
+    query = db.query(models.Parcel)
+    if current_user is not None and current_user.role != "admin":
+        query = query.filter(models.Parcel.user_id == current_user.id)
+    parcels = query.order_by(models.Parcel.id.asc()).all()
     if parcels:
         features = [parcel_to_feature(parcel) for parcel in parcels]
+    elif current_user is not None and current_user.role != "admin":
+        features = []
     else:
         data_path = os.path.join(BASE_DIR, "data.json")
         with open(data_path, "r", encoding="utf-8") as source:
@@ -456,6 +486,8 @@ async def lifespan(app: FastAPI):
     try:
         Base.metadata.create_all(bind=engine)
         migrate_chat_history_user_id()
+        migrate_parcels_user_id()
+        migrate_user_location_cols()
         migrated_columns = migrate_unicode_text_columns()
         print("[OK DATABASE] Đã kết nối CSDL và khởi tạo các bảng thành công!")
         if migrated_columns:
@@ -510,6 +542,47 @@ app = FastAPI(
     default_response_class=SafeJSONResponse,
 )
 
+
+@app.exception_handler(RequestValidationError)
+async def log_request_validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path == "/api/register":
+        field_names = {
+            "full_name": "Họ và tên",
+            "username": "Tên tài khoản",
+            "password": "Mật khẩu",
+        }
+        errors = [
+            {
+                "field": ".".join(str(part) for part in error["loc"]),
+                "type": error["type"],
+                "message": error["msg"],
+            }
+            for error in exc.errors()
+        ]
+        logger.warning(
+            "Lỗi validation %s %s: %s",
+            request.method,
+            request.url.path,
+            json.dumps(errors, ensure_ascii=False),
+        )
+        messages = []
+        for error in exc.errors():
+            field = str(error["loc"][-1]) if error["loc"] else ""
+            label = field_names.get(field, "Thông tin")
+            message = error["msg"].removeprefix("Value error, ")
+            if field == "username" and error["type"] == "value_error":
+                messages.append(message)
+            else:
+                messages.append(f"{label}: {message}")
+
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "\n".join(messages)},
+        )
+
+    return await request_validation_exception_handler(request, exc)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_allowed_origins(),
@@ -546,6 +619,26 @@ async def serve_login_html():
         return FileResponse(LOGIN_HTML_PATH)
     return {"message": "Không tìm thấy file login.html"}
 
+PUBLIC_FRONTEND_FILES = {
+    "index.html",
+    "admin.html",
+    "login.html",
+    "auth.js",
+    "script.js",
+    "style.css",
+    "data.js",
+}
+
+
+@app.get("/{asset_name}", include_in_schema=False)
+async def serve_frontend_asset(asset_name: str):
+    if asset_name not in PUBLIC_FRONTEND_FILES:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài nguyên.")
+    asset_path = os.path.join(BASE_DIR, asset_name)
+    if not os.path.isfile(asset_path):
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài nguyên.")
+    return FileResponse(asset_path)
+
 
 # ------------------------------------------------------------------------------
 # 4. API AUTHENTICATION (ĐĂNG KÝ & ĐĂNG NHẬP)
@@ -570,7 +663,10 @@ class RegisterSchema(BaseModel):
     def validate_username(cls, value: str) -> str:
         value = value.strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]{3,50}", value):
-            raise ValueError("Tên tài khoản chỉ được gồm chữ ASCII, số, dấu chấm, gạch dưới hoặc gạch ngang (3–50 ký tự).")
+            raise ValueError(
+                "Tên tài khoản phải có 3–50 ký tự, chỉ gồm chữ không dấu (A-Z, a-z), "
+                "số, dấu chấm (.), gạch dưới (_) hoặc gạch ngang (-)."
+            )
         return value
 
     @field_validator("password")
@@ -750,12 +846,14 @@ def tool_thong_tin_thua(ma_thua: str) -> str:
 def tool_tinh_tong_dien_tich(
     dieu_kien: Optional[str] = None,
     danh_sach_thua: Optional[list[str]] = None,
+    cay_trong: Optional[str] = None,
 ) -> str:
-    """Tính tổng diện tích các thửa đất theo điều kiện hoặc danh sách mã/tên chính xác."""
+    """Tính tổng diện tích theo cây trồng, điều kiện hoặc danh sách mã/tên chính xác."""
     return json.dumps(
         gis_tinh_tong_dien_tich(
             dieu_kien=dieu_kien,
             danh_sach_thua=danh_sach_thua,
+            cay_trong=cay_trong,
         ),
         ensure_ascii=False,
     )
@@ -1330,23 +1428,31 @@ def tool_web_search(query: str) -> str:
     """Tra cứu web, ưu tiên endpoint chính thức đã cấu hình rồi fallback sang tìm kiếm web."""
     return json.dumps(_perform_web_search(query), ensure_ascii=False)
 
-GEMINI_REQUEST_TIMEOUT_SECONDS = max(
-    1,
-    int(os.environ.get("GEMINI_REQUEST_TIMEOUT_SECONDS", "10")),
+MAX_GEMINI_REQUEST_TIMEOUT_SECONDS = 30
+GEMINI_CAPABILITY_PROBE_TIMEOUT_SECONDS = 20
+
+
+def _bounded_timeout_setting(name: str, default: int, maximum: int) -> int:
+    return min(maximum, max(1, int(os.environ.get(name, str(default)))))
+
+
+GEMINI_REQUEST_TIMEOUT_SECONDS = _bounded_timeout_setting(
+    "GEMINI_REQUEST_TIMEOUT_SECONDS",
+    MAX_GEMINI_REQUEST_TIMEOUT_SECONDS,
+    MAX_GEMINI_REQUEST_TIMEOUT_SECONDS,
 )
-GEMINI_MODEL_REQUEST_TIMEOUT_SECONDS = max(
-    1,
-    int(os.environ.get(
-        "GEMINI_MODEL_REQUEST_TIMEOUT_SECONDS",
-        str(GEMINI_REQUEST_TIMEOUT_SECONDS),
-    )),
+GEMINI_MODEL_REQUEST_TIMEOUT_SECONDS = _bounded_timeout_setting(
+    "GEMINI_MODEL_REQUEST_TIMEOUT_SECONDS",
+    GEMINI_REQUEST_TIMEOUT_SECONDS,
+    MAX_GEMINI_REQUEST_TIMEOUT_SECONDS,
 )
 GEMINI_HTTP_TIMEOUT_MILLISECONDS = max(
     1_000,
-    int(os.environ.get(
+    _bounded_timeout_setting(
         "GEMINI_HTTP_TIMEOUT_MILLISECONDS",
-        str(GEMINI_REQUEST_TIMEOUT_SECONDS * 1_000),
-    )),
+        GEMINI_REQUEST_TIMEOUT_SECONDS * 1_000,
+        MAX_GEMINI_REQUEST_TIMEOUT_SECONDS * 1_000,
+    ),
 )
 GEMINI_SDK_RETRY_ATTEMPTS = max(1, int(os.environ.get("GEMINI_SDK_RETRY_ATTEMPTS", "1")))
 MAX_GEMINI_IMAGE_BYTES = 5 * 1024 * 1024
@@ -1365,23 +1471,18 @@ client = (
     else None
 )
 
-# Ưu tiên model cấu hình, sau đó thử các model fallback đã được cấu hình mặc định.
+# This application deliberately uses a single selected model with no model fallback.
+GEMINI_MODEL_ID_PATTERN = re.compile(r"gemini-[A-Za-z0-9][A-Za-z0-9._-]{0,100}\Z")
+
+
 def build_gemini_models() -> list[str]:
-    preferred = os.environ.get("GEMINI_MODEL", "").strip()
-    fallback_models = os.environ.get("GEMINI_FALLBACK_MODELS") or (
-        "gemini-3.6-flash,gemini-3.8-flash"
-    )
-    candidates = [preferred] if preferred else []
-    candidates.extend(model.strip() for model in fallback_models.split(","))
-    unique = []
-    seen = set()
-    for model in candidates:
-        model = model.replace("models/", "", 1).strip()
-        if not model or model in seen:
-            continue
-        seen.add(model)
-        unique.append(model)
-    return unique
+    selected = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+    if not GEMINI_MODEL_ID_PATTERN.fullmatch(selected):
+        logger.error(
+            "Invalid GEMINI_MODEL value; no model configured. Expected a Gemini model ID."
+        )
+        return []
+    return [selected]
 
 GEMINI_MODELS = build_gemini_models()
 
@@ -1392,13 +1493,34 @@ def _gemini_model_id(model) -> str:
     return str(value or "").replace("models/", "", 1).strip()
 
 
+def _gemini_status_code(error: Exception) -> Optional[int]:
+    raw_status = getattr(error, "code", None) or getattr(error, "status_code", None)
+    if raw_status is not None:
+        try:
+            return int(raw_status)
+        except (TypeError, ValueError):
+            pass
+
+    normalized = f"{raw_status or ''} {type(error).__name__} {error}".upper()
+    for marker, code in (
+        ("UNAUTHENTICATED", 401),
+        ("PERMISSION_DENIED", 403),
+        ("NOT_FOUND", 404),
+        ("RESOURCE_EXHAUSTED", 429),
+        ("DEADLINE_EXCEEDED", 504),
+        ("UNAVAILABLE", 503),
+        ("INTERNAL", 500),
+    ):
+        if marker in normalized:
+            return code
+    if isinstance(error, TimeoutError) or "TIMEOUT" in normalized:
+        return 504
+    return None
+
+
 def _gemini_error_details(error: Exception) -> dict:
     """Extract safe diagnostic details without returning credentials or raw traces."""
-    status_code = getattr(error, "code", None) or getattr(error, "status_code", None)
-    try:
-        status_code = int(status_code) if status_code is not None else None
-    except (TypeError, ValueError):
-        status_code = None
+    status_code = _gemini_status_code(error)
     message = re.sub(
         r"(?i)(AIza[0-9A-Za-z_-]{20,}|(?:api[_ -]?key|authorization)\s*[:=]\s*(?:Bearer\s+)?\S+|Bearer\s+\S+)",
         "[REDACTED]",
@@ -1440,28 +1562,19 @@ def _response_has_function_call(response) -> bool:
     )
 
 
-def _probe_gemini_model(model_name: str) -> dict:
-    """Run small live probes for text generation, function calling and vision."""
-    if client is None:
-        return {
-            "function_calling": "not_configured",
-            "vision": "not_configured",
-        }
-
-    result = {
-        "function_calling": "error",
-        "vision": "error",
-    }
+def _probe_gemini_model(model_name: str, probe_client) -> dict:
+    """Make one bounded live Function Calling request for a configured model."""
+    result = {"function_calling": "error", "vision": "not_probed"}
     try:
         function_declaration = types.FunctionDeclaration.from_callable(
-            client=client,
+            client=probe_client,
             callable=_diagnostic_tool,
         )
         function_config = types.GenerateContentConfig(
             tools=[types.Tool(function_declarations=[function_declaration])],
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
-        diagnostic_chat = client.chats.create(
+        diagnostic_chat = probe_client.chats.create(
             model=model_name,
             config=function_config,
         )
@@ -1471,30 +1584,81 @@ def _probe_gemini_model(model_name: str) -> dict:
         result["function_calling"] = "supported" if _response_has_function_call(response) else "request_succeeded_no_call"
     except Exception as error:
         result["function_calling_error"] = _gemini_error_details(error)
-
-    try:
-        # A valid 1x1 PNG. This checks that the model accepts image input without
-        # uploading a user image or disclosing application data.
-        tiny_png = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-        )
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[
-                types.Part.from_bytes(data=tiny_png, mime_type="image/png"),
-                "Describe this image briefly.",
-            ],
-        )
-        result["vision"] = "supported" if getattr(response, "text", None) else "request_succeeded_no_text"
-    except Exception as error:
-        result["vision_error"] = _gemini_error_details(error)
-
     return result
+
+
+def _probe_gemini_models() -> dict:
+    """Run a single Function Calling probe within a 20-second network budget."""
+    started = time.perf_counter()
+    model_name = GEMINI_MODELS[0]
+    probe_client = None
+    try:
+        probe_client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=GEMINI_CAPABILITY_PROBE_TIMEOUT_SECONDS * 1_000,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
+        )
+        model_result = {
+            "model": model_name,
+            "configured": True,
+            "available": None,
+            "status": "probe_failed",
+            "supported_actions": [],
+            "generate_content": None,
+            **_probe_gemini_model(model_name, probe_client),
+        }
+    except Exception as error:
+        model_result = {
+            "model": model_name,
+            "configured": True,
+            "available": None,
+            "status": "probe_failed",
+            "supported_actions": [],
+            "generate_content": None,
+            "function_calling": "error",
+            "function_calling_error": _gemini_error_details(error),
+            "vision": "not_probed",
+        }
+    finally:
+        if probe_client is not None:
+            try:
+                probe_client.close()
+            except Exception:
+                logger.warning("Gemini capability probe client failed to close.")
+
+    function_calling = model_result["function_calling"]
+    if function_calling in ("supported", "request_succeeded_no_call"):
+        model_result["available"] = True
+        model_result["generate_content"] = True
+        model_result["status"] = "available"
+    elif model_result.get("function_calling_error", {}).get("status_code") == 404:
+        model_result["available"] = False
+        model_result["status"] = "not_found"
+
+    return {
+        "status": "ok" if model_result["available"] else "probe_failed",
+        "configured_models": GEMINI_MODELS,
+        "models": [model_result],
+        "available_model_count": int(model_result["available"] is True),
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+        "probe": True,
+    }
 
 
 def check_gemini_models(*, probe: bool = False) -> dict:
     """Discover configured Gemini models and optionally run live capability probes."""
     started = time.perf_counter()
+    if not GEMINI_MODELS:
+        return {
+            "status": "no_configured_models",
+            "configured_models": [],
+            "models": [],
+            "available_model_count": 0,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            "probe": probe,
+        }
     if client is None or not api_key:
         return {
             "status": "not_configured",
@@ -1502,6 +1666,9 @@ def check_gemini_models(*, probe: bool = False) -> dict:
             "models": [],
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
         }
+
+    if probe:
+        return _probe_gemini_models()
 
     try:
         available_models = list(client.models.list())
@@ -1538,8 +1705,6 @@ def check_gemini_models(*, probe: bool = False) -> dict:
         else:
             model_result.update(_gemini_capabilities(model))
             model_result["status"] = "available"
-            if probe:
-                model_result.update(_probe_gemini_model(model_name))
         results.append(model_result)
 
     available_configured = [item for item in results if item["available"]]
@@ -1549,7 +1714,7 @@ def check_gemini_models(*, probe: bool = False) -> dict:
         "models": results,
         "available_model_count": len(available_configured),
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
-        "probe": probe,
+        "probe": False,
     }
 
 SYSTEM_PROMPT = """Bạn là Trợ lý AI Bản đồ Nông nghiệp Thông minh chuyên nghiệp.
@@ -1559,7 +1724,7 @@ WEB LOOKUP RULES: For current weather, crop prices, news, regulations, latest in
 
 1. KHÔNG TỰ BỊA ĐẶT SỐ LIỆU: Mọi thông tin về tên thửa, độ ẩm, diện tích, nhiệt độ, cây trồng PHẢI được lấy từ các công cụ (tools) được cung cấp. Tuyệt đối không tự ước đoán số liệu.
 1a. Khi người dùng hỏi thông tin của một thửa đất cụ thể, gọi `tool_thong_tin_thua` với mã hoặc số thửa; không tự đoán thuộc tính.
-2. KHÔNG TỰ TÍNH TOÁN TRONG ĐẦU: Nếu người dùng hỏi tổng diện tích, bạn BẮT BUỘC phải gọi hàm `tool_tinh_tong_dien_tich`. Hãy cộng theo diện tích đã lưu trong dữ liệu của từng thửa, không tính lại diện tích từ hình học. Nếu người dùng nêu rõ mã/tên các thửa (ví dụ T1 và T2 hoặc Thửa 1 và Thửa 2), truyền từng mã/tên vào `danh_sach_thua`. Nếu người dùng chỉ nêu số lượng (ví dụ "2 thửa") mà không xác định đó là thửa nào, hãy hỏi lại người dùng; không tự chọn thửa.
+2. KHÔNG TỰ TÍNH TOÁN TRONG ĐẦU: Nếu người dùng hỏi tổng diện tích, bạn BẮT BUỘC phải gọi hàm `tool_tinh_tong_dien_tich`. Hãy cộng theo diện tích đã lưu trong dữ liệu của từng thửa, không tính lại diện tích từ hình học. Nếu người dùng lọc theo cây trồng, truyền điều kiện vào `cay_trong`; nếu nêu rõ mã/tên thửa, truyền vào `danh_sach_thua`. Nếu chỉ nêu số lượng (ví dụ "2 thửa") mà không xác định thửa nào, hãy hỏi lại; không tự chọn.
 3. CÂU HỎI NGOÀI PHẠM VI HOẶC MƠ HỒ: Với câu hỏi cảm tính không có tiêu chí đo lường (ví dụ: "thửa nào đẹp nhất?"), hãy hỏi người dùng tiêu chí cụ thể hoặc giải thích dữ liệu hiện có. Với dữ liệu hiện thời ngoài GIS như giá nông sản, thời tiết, tin tức hay quy định, hãy dùng `tool_web_search` theo WEB LOOKUP RULES; không từ chối chỉ vì dữ liệu đó không nằm trong GIS.
 4. PHONG CÁCH TRẢ LỜI: Ngắn gọn, thân thiện, chính xác, có định dạng rõ ràng (sử dụng icon phù hợp như 🌾, 💧, 📐, 🌡️, 🏠).
 5. NHỚ NGỮ CẢNH: Khi có lịch sử hội thoại trong ngữ cảnh hiện tại, hãy dùng các kết quả đó để trả lời câu hỏi nối tiếp. Không suy đoán ngữ cảnh nếu lịch sử không được cung cấp.
@@ -1598,13 +1763,6 @@ AI_TOOL_FUNCTIONS = {
 
 
 AI_TOOL_REGISTRY = build_ai_tool_registry()
-ai_config = types.GenerateContentConfig(
-    system_instruction=SYSTEM_PROMPT,
-    tools=[types.Tool(function_declarations=AI_TOOL_REGISTRY)] if AI_TOOL_REGISTRY else [],
-    automatic_function_calling=types.AutomaticFunctionCallingConfig(
-        disable=True,
-    ),
-)
 
 
 MAX_GEMINI_TOOL_ROUNDS = 4
@@ -1612,6 +1770,71 @@ MAX_GEMINI_TOOL_CALLS_PER_ROUND = 8
 MAX_GEMINI_TOOL_RESULT_CHARS = 8_000
 MAX_GEMINI_PARCEL_IDS = 20
 MAX_WEB_SOURCES_IN_REPLY = 5
+
+GIS_INTENT_TOOL_NAMES = {
+    "parcel": {"tool_thong_tin_thua"},
+    "location": {"tool_tim_vi_tri_doi_tuong", "tool_thua_gan"},
+    "distance": {"tool_khoang_cach"},
+    "area": {"tool_tinh_tong_dien_tich"},
+    "extreme": {"tool_thua_cuc_tri"},
+    "filter": {"tool_loc_thua"},
+}
+WEB_LOOKUP_TOOL_NAMES = {
+    "tool_du_bao_thoi_tiet",
+    "tool_tra_cuu_gia_nong_san",
+    "tool_web_search",
+}
+
+
+def _selected_gemini_tool_names(message: str) -> set[str]:
+    normalized = clean_text(message)
+    selected = set()
+    if _is_gis_data_question(message):
+        intents = _direct_gis_intents(normalized)
+        if intents:
+            for intent in intents:
+                selected.update(GIS_INTENT_TOOL_NAMES.get(intent, ()))
+        else:
+            selected.update(GIS_EVIDENCE_TOOLS)
+
+    if any(
+        marker in normalized
+        for marker in (
+            "thoi tiet",
+            "du bao",
+            "gia nong san",
+            "gia lua",
+            "gia khoai",
+            "gia ca",
+            "tin tuc",
+            "quy dinh",
+            "moi nhat",
+            "hom nay",
+            "hien tai",
+            "weather",
+            "news",
+            "latest",
+            "current price",
+        )
+    ):
+        selected.update(WEB_LOOKUP_TOOL_NAMES)
+    return selected
+
+
+def _build_gemini_request_config(message: str):
+    selected_names = _selected_gemini_tool_names(message)
+    declarations = [
+        declaration
+        for declaration in AI_TOOL_REGISTRY
+        if getattr(declaration, "name", None) in selected_names
+    ]
+    return types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        tools=[types.Tool(function_declarations=declarations)] if declarations else [],
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            disable=True,
+        ),
+    )
 
 
 def _response_parts(response) -> list[types.Part]:
@@ -1716,15 +1939,79 @@ def _build_gemini_history(history: list["ChatTurn"]) -> list[types.Content]:
     return contents
 
 
+GIS_EVIDENCE_TOOLS = {
+    "tool_loc_thua",
+    "tool_thua_cuc_tri",
+    "tool_thong_tin_thua",
+    "tool_tinh_tong_dien_tich",
+    "tool_thua_gan",
+    "tool_khoang_cach",
+    "tool_tim_vi_tri_doi_tuong",
+}
+
+
+def _is_gis_data_question(message: str) -> bool:
+    normalized = clean_text(message)
+    return any(
+        marker in normalized
+        for marker in (
+            "thua",
+            "parcel",
+            "dien tich",
+            "do am",
+            "nhiet do",
+            "cay trong",
+            "loai cay",
+            "khoang cach",
+            "gieng",
+            "nha kho",
+            "toa do",
+            "vi tri",
+        )
+    )
+
+
+def _tool_result_count(result: str) -> Optional[int]:
+    try:
+        parsed = json.loads(result)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    for key in ("tong_so", "so_thua"):
+        if isinstance(parsed.get(key), int):
+            return parsed[key]
+    data = parsed.get("du_lieu")
+    if isinstance(data, list):
+        return len(data)
+    if isinstance(data, dict):
+        return 1
+    parcel_ids = parsed.get("parcel_ids")
+    if isinstance(parcel_ids, list):
+        return len(parcel_ids)
+    return None
+
+
+class UnverifiedGISResponseError(RuntimeError):
+    """Raised when Gemini answers a GIS data question without successful GIS evidence."""
+
+
 async def _send_gemini_message(
     chat_session,
     contents,
     deadline: float,
+    tool_call_trace: Optional[list[dict[str, object]]] = None,
 ) -> tuple[str, list[str]]:
     started = time.perf_counter()
     parcel_ids = []
     web_sources = []
     executed_tool_signatures = set()
+    successful_gis_tool_calls = set()
+    request_text = " ".join(
+        content for content in (contents if isinstance(contents, list) else [contents])
+        if isinstance(content, str)
+    )
+    requires_gis_evidence = _is_gis_data_question(request_text)
 
     for _ in range(MAX_GEMINI_TOOL_ROUNDS + 1):
         remaining = deadline - asyncio.get_running_loop().time()
@@ -1751,6 +2038,13 @@ async def _send_gemini_message(
             ).strip()
             if not text:
                 raise RuntimeError("Gemini returned neither text nor a function call.")
+            if requires_gis_evidence and not successful_gis_tool_calls:
+                logger.warning(
+                    "Gemini returned unverified GIS content: successful_gis_tools=0"
+                )
+                raise UnverifiedGISResponseError(
+                    "Gemini did not successfully call a GIS data tool for this question."
+                )
             if web_sources and "http" not in text.lower():
                 text += "\n\nNguồn tham khảo:\n" + "\n".join(
                     f"- {source['title']} — {source['url']} (truy cập {source['accessed_at']})"
@@ -1786,6 +2080,18 @@ async def _send_gemini_message(
                     )
                 )
                 continue
+            trace_entry: dict[str, object] = {
+                "name": function_name,
+                "argument_names": sorted(function_arguments),
+                "status": "error",
+            }
+            if tool_call_trace is not None:
+                tool_call_trace.append(trace_entry)
+            logger.info(
+                "Gemini requested tool: tool=%s argument_names=%s",
+                function_name,
+                sorted(function_arguments),
+            )
             call_signature = _tool_call_signature(function_name, function_arguments)
             function = AI_TOOL_FUNCTIONS.get(function_name)
             if function is None:
@@ -1798,6 +2104,36 @@ async def _send_gemini_message(
                 try:
                     executed_tool_signatures.add(call_signature)
                     function_arguments = _validate_tool_arguments(function, function_arguments)
+                    if function_name == "tool_thua_cuc_tri":
+                        diagnostic_arguments = {
+                            name: value
+                            for name, value in function_arguments.items()
+                            if name == "truong"
+                            and isinstance(value, str)
+                            and value in {
+                                "dien_tich",
+                                "dien_tich_m2",
+                                "area_sqm",
+                                "area",
+                                "do_am",
+                                "do_am_pct",
+                                "humidity",
+                                "nhiet_do",
+                                "temperature",
+                            }
+                            or (
+                                name == "loai"
+                                and isinstance(value, str)
+                                and value in {"max", "min"}
+                            )
+                        }
+                        if diagnostic_arguments:
+                            trace_entry["diagnostic_arguments"] = diagnostic_arguments
+                            logger.info(
+                                "Gemini validated diagnostic tool arguments: tool=%s arguments=%s",
+                                function_name,
+                                json.dumps(diagnostic_arguments, ensure_ascii=False, sort_keys=True),
+                            )
                     tool_started = time.perf_counter()
                     tool_timeout = deadline - asyncio.get_running_loop().time()
                     if tool_timeout <= 0:
@@ -1808,9 +2144,17 @@ async def _send_gemini_message(
                             timeout=tool_timeout,
                         )
                     )
+                    trace_entry["status"] = "ok"
+                    result_count = _tool_result_count(result)
+                    if result_count is not None:
+                        trace_entry["result_count"] = result_count
+                    if function_name in GIS_EVIDENCE_TOOLS:
+                        successful_gis_tool_calls.add(function_name)
                     logger.info(
-                        "Gemini tool completed: tool=%s elapsed_ms=%.2f result_chars=%d",
+                        "Gemini tool completed: tool=%s argument_names=%s result_count=%s elapsed_ms=%.2f result_chars=%d",
                         function_name,
+                        sorted(function_arguments),
+                        result_count,
                         (time.perf_counter() - tool_started) * 1000,
                         len(result),
                     )
@@ -1860,9 +2204,9 @@ class ChatTurn(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
-    user_id: Optional[int] = None
     image_base64: Optional[str] = None
     history: list[ChatTurn] = Field(default_factory=list, max_length=12)
+    force_gemini: bool = False
 
 
 def _format_direct_gis_result(result: dict, operation: str) -> tuple[str, list[str]]:
@@ -1895,6 +2239,27 @@ def _format_direct_gis_result(result: dict, operation: str) -> tuple[str, list[s
             f"{result.get('tong_dien_tich_m2')} m².",
             parcel_ids,
         )
+    if operation == "filter":
+        records = result.get("du_lieu", [])
+        if not records:
+            return "Không tìm thấy thửa đất nào thỏa mãn điều kiện.", parcel_ids
+        lines = [f"🗺️ Tìm thấy {result.get('tong_so', len(records))} thửa phù hợp:"]
+        for item in records:
+            label = item.get("ten") or item.get("id", "Thửa đất")
+            parcel_id = item.get("id") or item.get("parcel_code")
+            details = []
+            if item.get("cay_trong"):
+                details.append(f"cây trồng {item['cay_trong']}")
+            area = item.get("dien_tich_m2", item.get("dien_tich"))
+            if area not in (None, ""):
+                details.append(f"diện tích {area} m²")
+            humidity = item.get("do_am", item.get("do_am_pct", item.get("humidity")))
+            if humidity not in (None, ""):
+                details.append(f"độ ẩm {humidity}%")
+            suffix = f" — {', '.join(details)}" if details else ""
+            identifier = f" (ID: {parcel_id})" if parcel_id else ""
+            lines.append(f"- {label}{identifier}{suffix}")
+        return "\n".join(lines), parcel_ids
     data = result.get("du_lieu", {})
     if not isinstance(data, dict):
         data = {}
@@ -1966,37 +2331,89 @@ def _extract_reply_sources(reply: str) -> list[dict]:
 
 
 def _extract_direct_parcel_identifiers(message: str) -> list[str]:
-    """Extract parcel codes and common Vietnamese ordinal forms in input order.
-
-    Handles cases like "thua 2 và 3" or "thua 2, 3" where the second parcel
-    number appears without the word "thua" in front of it.
-    """
+    """Extract explicit parcel IDs without treating counts or thresholds as IDs."""
     normalized = clean_text(message)
     pattern = re.compile(
-        r"\b(?:t\s*\d+|thua(?:\s+dat)?(?:\s+so)?(?:\s+thu)?\s*#?\s*\d+)\b",
+        r"\b(?:(?:t\s*#?\s*(?P<code>\d+))|"
+        r"(?:thua(?:\s+dat)?(?:\s+so)?(?:\s+thu)?\s*#?\s*(?P<number>\d+)))\b",
         flags=re.IGNORECASE,
     )
-    raw_matches = [match.group(0).strip() for match in pattern.finditer(normalized)]
-    matches = list(dict.fromkeys(raw_matches))
+    continuation_pattern = re.compile(
+        r"\s*(?:[,;]|\bva\b)\s*"
+        r"(?:(?:thua(?:\s+dat)?(?:\s+so)?(?:\s+thu)?)\s*)?"
+        r"(?:t\s*#?\s*)?#?(?P<number>\d+)\b",
+        flags=re.IGNORECASE,
+    )
+    identifiers = []
+    seen = set()
+    for match in pattern.finditer(normalized):
+        number = str(int(match.group("code") or match.group("number")))
+        identifier = f"T{number}"
+        if identifier not in seen:
+            identifiers.append(identifier)
+            seen.add(identifier)
 
-    # Collect numbers already covered by "thua X" / "tX" matches to avoid duplicates.
-    covered_numbers: set[str] = set()
-    for m in matches:
-        num_match = re.search(r"\d+$", m)
-        if num_match:
-            covered_numbers.add(num_match.group(0))
+        cursor = match.end()
+        while continuation := continuation_pattern.match(normalized, cursor):
+            number = str(int(continuation.group("number")))
+            identifier = f"T{number}"
+            if identifier not in seen:
+                identifiers.append(identifier)
+                seen.add(identifier)
+            cursor = continuation.end()
 
-    # If the message asks about total area or mentions "thua", also extract
-    # standalone 1-2 digit numbers that likely refer to additional parcels
-    # (e.g. "thua 2 và 3" -> "3" should be included as parcel t3).
-    if "thua" in normalized or "tong dien tich" in normalized:
-        for num_match in re.finditer(r"\b(\d{1,2})\b", normalized):
-            num_str = num_match.group(1)
-            if num_str not in covered_numbers:
-                matches.append(f"t{num_str}")
-                covered_numbers.add(num_str)
+    return identifiers
 
-    return matches
+
+def _extract_crop_filter(normalized: str) -> Optional[str]:
+    parcels = gis_service.PARCEL_GDF
+    if parcels is not None:
+        crop_column = next(
+            (column for column in ("cay_trong", "loai_nong_san", "loai_dat") if column in parcels.columns),
+            None,
+        )
+        if crop_column:
+            known_crops = sorted(
+                {
+                    str(value).strip()
+                    for value in parcels[crop_column].dropna()
+                    if str(value).strip()
+                },
+                key=len,
+                reverse=True,
+            )
+            for crop_name in known_crops:
+                crop_key = clean_text(crop_name)
+                if re.search(rf"(?<!\w){re.escape(crop_key)}(?!\w)", normalized):
+                    return crop_name
+
+    match = re.search(
+        r"\b(?:cay trong|loai cay|trong)\s+(?:cac\s+)?(?:thua\s+)?(.+)",
+        normalized,
+    )
+    if not match:
+        return None
+
+    crop = re.split(
+        r"\b(?:la|nao|co|duoi|tren|nho hon|lon hon|it nhat|toi da|bao nhieu|"
+        r"va|voi|trong|the nao)\b|[?!.;,]",
+        match.group(1),
+        maxsplit=1,
+    )[0].strip()
+    return crop or None
+
+
+def _extract_humidity_limits(normalized: str) -> tuple[Optional[float], Optional[float]]:
+    minimum = re.search(
+        r"\bdo am\s+(?:tren|lon hon|it nhat|tu)\s*(\d+(?:[.,]\d+)?)",
+        normalized,
+    )
+    maximum = re.search(
+        r"\bdo am\s+(?:duoi|nho hon|thap hon|toi da|den)\s*(\d+(?:[.,]\d+)?)",
+        normalized,
+    )
+    parse = lambda match: float(match.group(1).replace(",", ".")) if match else None
+    return parse(minimum), parse(maximum)
 
 
 def _direct_gis_intents(normalized: str) -> set[str]:
@@ -2009,10 +2426,18 @@ def _direct_gis_intents(normalized: str) -> set[str]:
         intents.add("distance")
     if "tong dien tich" in normalized:
         intents.add("area")
-    if any(marker in normalized for marker in ("lon nhat", "nho nhat", "cao nhat", "thap nhat")) and any(
-        marker in normalized for marker in ("dien tich", "do am", "nhiet do")
+    if (
+        any(marker in normalized for marker in ("lon nhat", "nho nhat", "cao nhat", "thap nhat", "kho nhat"))
+        and any(marker in normalized for marker in ("dien tich", "do am", "nhiet do", "kho nhat"))
     ):
         intents.add("extreme")
+    if (
+        _extract_crop_filter(normalized)
+        and "tong dien tich" not in normalized
+        and any(marker in normalized for marker in ("thua", "tim", "loc"))
+        and any(marker in normalized for marker in ("do am", "nhiet do", "thua nao", "cac thua"))
+    ):
+        intents.add("filter")
     return intents
 
 
@@ -2032,9 +2457,14 @@ def _requested_extreme_operations(normalized: str) -> list[tuple[str, str]]:
         for pattern, kind in (
             (r"\b(?:lon nhat|cao nhat)\b", "max"),
             (r"\b(?:nho nhat|thap nhat)\b", "min"),
+            (r"\bkho nhat\b", "min"),
+            (r"\bam nhat\b", "min"),
         )
         for match in re.finditer(pattern, normalized)
     ]
+    if not any(field == "do_am" for _, field in fields) and "kho nhat" in normalized:
+        fields.append((normalized.index("kho nhat"), "do_am"))
+        fields.sort()
     if not fields or not directions:
         return []
 
@@ -2090,6 +2520,18 @@ def _try_direct_gis_chat(message: str) -> Optional[tuple[str, list[str]]]:
         if keyword:
             return _format_direct_gis_result(gis_tim_vi_tri_doi_tuong(keyword), "location")
 
+    crop_filter = _extract_crop_filter(normalized)
+    if "filter" in intents and crop_filter:
+        humidity_min, humidity_max = _extract_humidity_limits(normalized)
+        return _format_direct_gis_result(
+            gis_loc_thua(
+                cay_trong=crop_filter,
+                do_am_toi_thieu=humidity_min,
+                do_am_toi_da=humidity_max,
+            ),
+            "filter",
+        )
+
     distance_match = re.search(r"(?:tu|giua)\s+(.+?)\s+(?:den|va)\s+(.+?)(?:\?|$)", normalized)
     if "khoang cach" in normalized and distance_match:
         return _format_direct_gis_result(
@@ -2099,14 +2541,23 @@ def _try_direct_gis_chat(message: str) -> Optional[tuple[str, list[str]]]:
 
     if "tong dien tich" in normalized:
         identifiers = _extract_direct_parcel_identifiers(message)
+        if not identifiers and re.search(r"\b\d+\s+thua\b", normalized):
+            quantity = re.search(r"\b(\d+)\s+thua\b", normalized)
+            quantity_text = quantity.group(1) if quantity else "các"
+            return (
+                f"Bạn muốn tính tổng diện tích của {quantity_text} thửa nào? "
+                "Vui lòng cung cấp mã cụ thể, ví dụ T1 và T2.",
+                [],
+            )
         return _format_direct_gis_result(
-            gis_tinh_tong_dien_tich(danh_sach_thua=identifiers or None),
+            gis_tinh_tong_dien_tich(
+                danh_sach_thua=identifiers or None,
+                cay_trong=crop_filter,
+            ),
             "area",
         )
 
-    if any(item in normalized for item in ("lon nhat", "nho nhat", "cao nhat", "thap nhat")) and any(
-        item in normalized for item in ("dien tich", "do am", "nhiet do")
-    ):
+    if "extreme" in intents:
         requested_operations = _requested_extreme_operations(normalized)
         if not requested_operations:
             return None
@@ -2174,7 +2625,19 @@ def _try_system_gis_chat(message: str) -> Optional[tuple[str, list[str]]]:
         parcel_ids.extend(ids)
 
     if "area" in intents:
-        result = gis_tinh_tong_dien_tich()
+        identifiers = _extract_direct_parcel_identifiers(message)
+        if not identifiers and re.search(r"\b\d+\s+thua\b", normalized):
+            quantity = re.search(r"\b(\d+)\s+thua\b", normalized)
+            quantity_text = quantity.group(1) if quantity else "các"
+            return (
+                f"Bạn muốn tính tổng diện tích của {quantity_text} thửa nào? "
+                "Vui lòng cung cấp mã cụ thể, ví dụ T1 và T2.",
+                [],
+            )
+        result = gis_tinh_tong_dien_tich(
+            danh_sach_thua=identifiers or None,
+            cay_trong=_extract_crop_filter(normalized),
+        )
         reply, ids = _format_direct_gis_result(result, "area")
         replies.append(reply)
         parcel_ids.extend(ids)
@@ -2367,6 +2830,8 @@ def _return_system_fallback(
     error_status: Optional[int] = None,
     image_attached: bool = False,
     history: Optional[list["ChatTurn"]] = None,
+    tool_calls: Optional[list[dict[str, object]]] = None,
+    elapsed_seconds: Optional[float] = None,
 ) -> dict:
     reply_text, parcel_ids = _system_fallback_reply(
         user_message,
@@ -2392,6 +2857,14 @@ def _return_system_fallback(
         "sources": [],
         "fallback": True,
         "mode": "system",
+        "model": error_model,
+        "tool_calls": tool_calls or [],
+        "diagnostics": {
+            "status_code": error_status,
+            "error_type": error_type,
+            "elapsed_seconds": round(elapsed_seconds, 2) if elapsed_seconds is not None else None,
+            "tool_call_count": len(tool_calls or []),
+        },
     }
 
 
@@ -2399,16 +2872,41 @@ def _return_system_fallback(
 async def chat_endpoint(
     request: ChatRequest,
     background_tasks: BackgroundTasks,
-    current_user: Optional[models.User] = Depends(get_optional_current_user)
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    user_id = current_user.id if current_user else None
+    user_id = current_user.id
+
+    if (
+        current_user.role != "admin"
+        and GIS_EVIDENCE_TOOLS.intersection(_selected_gemini_tool_names(request.message))
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tra cứu dữ liệu GIS hệ thống chỉ dành cho Admin.",
+        )
+
+    # Lấy danh sách mã thửa của user để lọc kết quả chat (user thường chỉ thấy thửa của mình)
+    user_parcel_codes: Optional[list[str]] = None
+    if current_user.role != "admin":
+        user_parcel_codes = get_user_parcel_codes(db, user_id)
+
+    if request.force_gemini and current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chỉ Admin mới được bỏ qua xử lý GIS trực tiếp để chẩn đoán Gemini.",
+        )
 
     has_contextual_parcel_followup = (
         not request.image_base64
         and _message_references_prior_context(request.message)
         and bool(_history_selected_parcel_ids(request.history))
     )
-    if not request.image_base64 and not has_contextual_parcel_followup:
+    if (
+        not request.force_gemini
+        and not request.image_base64
+        and not has_contextual_parcel_followup
+    ):
         try:
             direct_result = _try_direct_gis_chat(request.message)
         except HTTPException:
@@ -2416,6 +2914,8 @@ async def chat_endpoint(
         if direct_result:
             logger.info("Chat request handled by direct GIS lookup; Gemini not called.")
             reply_text, parcel_ids = direct_result
+            # Lọc parcel_ids cho user thường
+            parcel_ids = filter_parcel_ids_for_user(parcel_ids, user_parcel_codes)
             background_tasks.add_task(
                 persist_chat_result,
                 user_id=user_id,
@@ -2423,7 +2923,15 @@ async def chat_endpoint(
                 response=reply_text,
                 intent="DIRECT_GIS",
             )
-            return {"reply": reply_text, "parcel_ids": parcel_ids}
+            return {
+                "reply": reply_text,
+                "parcel_ids": parcel_ids,
+                "sources": [],
+                "fallback": False,
+                "mode": "direct_gis",
+                "model": None,
+                "tool_calls": [],
+            }
 
     if client is None:
         logger.warning("Gemini request skipped: client is not configured.")
@@ -2470,9 +2978,22 @@ async def chat_endpoint(
             )
             raise HTTPException(status_code=422, detail=detail) from error
     contents.append(request.message)
+    request_ai_config = _build_gemini_request_config(request.message)
+    request_tools = (
+        request_ai_config.tools[0].function_declarations
+        if request_ai_config.tools
+        else []
+    )
+    logger.info(
+        "Gemini request prepared: tool_schema_count=%d history_turns=%d",
+        len(request_tools),
+        len(request.history),
+    )
 
     reply_text = None
     selected_parcel_ids = []
+    tool_call_trace: list[dict[str, object]] = []
+    successful_model = None
     last_error_status = None
     last_error_type = None
     last_error_message = None
@@ -2494,77 +3015,59 @@ async def chat_endpoint(
             asyncio.get_running_loop().time()
             + min(GEMINI_MODEL_REQUEST_TIMEOUT_SECONDS, remaining / models_remaining),
         )
-        for attempt in range(2):
-            remaining = model_deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
+        remaining = model_deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            last_error_type = "TimeoutError"
+            last_error_message = "Gemini exceeded this model's request deadline."
+            last_error_model = model_name
+            break
+        try:
+            logger.info("Gemini request started: model=%s", model_name)
+            chat_session = client.aio.chats.create(
+                model=model_name,
+                config=request_ai_config,
+                history=_build_gemini_history(request.history),
+            )
+            reply_text, selected_parcel_ids = await _send_gemini_message(
+                chat_session,
+                contents,
+                model_deadline,
+                tool_call_trace=tool_call_trace,
+            )
+            successful_model = model_name
+            logger.info(
+                "Gemini request completed: model=%s elapsed_seconds=%.2f",
+                model_name,
+                asyncio.get_running_loop().time() - request_started,
+            )
+        except Exception as e:
+            last_error_status = _gemini_status_code(e)
+            last_error_type = type(e).__name__
+            last_error_message = str(e)
+            last_error_model = model_name
+            logger.warning(
+                "Gemini request failed: model=%s status=%s error_type=%s elapsed_seconds=%.1f tool_calls=%d",
+                model_name,
+                last_error_status or "unknown",
+                type(e).__name__,
+                asyncio.get_running_loop().time() - request_started,
+                len(tool_call_trace),
+            )
+            if last_error_status in (401, 403):
+                stop_fallback = True
+            elif isinstance(e, TimeoutError):
                 last_error_type = "TimeoutError"
-                last_error_message = "Gemini exceeded this model's request deadline."
-                last_error_model = model_name
-                break
-            try:
-                logger.info("Gemini request started: model=%s", model_name)
-                chat_session = client.aio.chats.create(
-                    model=model_name,
-                    config=ai_config,
-                    history=_build_gemini_history(request.history),
-                )
-                reply_text, selected_parcel_ids = await _send_gemini_message(
-                    chat_session,
-                    contents,
-                    model_deadline,
-                )
+                last_error_message = str(e) or "Gemini request timed out."
+                if request_deadline - asyncio.get_running_loop().time() <= 0:
+                    stop_fallback = True
+            elif last_error_status not in (404, 429, 500, 502, 503, 504):
+                stop_fallback = True
+            else:
                 logger.info(
-                    "Gemini request completed: model=%s elapsed_seconds=%.2f",
-                    model_name,
-                    asyncio.get_running_loop().time() - request_started,
-                )
-                break
-            except Exception as e:
-                error_code = getattr(e, "code", None) or getattr(e, "status_code", None)
-                try:
-                    last_error_status = int(error_code)
-                except (TypeError, ValueError):
-                    last_error_status = None
-                last_error_type = type(e).__name__
-                last_error_message = str(e)
-                last_error_model = model_name
-                logger.warning(
-                    "Gemini request failed: model=%s status=%s error_type=%s elapsed_seconds=%.1f",
+                    "Not retrying the same Gemini model after transient failure: model=%s status=%s",
                     model_name,
                     last_error_status or "unknown",
-                    type(e).__name__,
-                    asyncio.get_running_loop().time() - request_started,
                 )
-                if last_error_status in (401, 403):
-                    stop_fallback = True
-                    break
-                if isinstance(e, TimeoutError):
-                    last_error_type = "TimeoutError"
-                    last_error_message = str(e) or "Gemini request timed out."
-                    if request_deadline - asyncio.get_running_loop().time() <= 0:
-                        stop_fallback = True
-                    break
-                if last_error_status not in (404, 429, 500, 502, 503, 504):
-                    stop_fallback = True
-                    break
-                transient_error = (
-                    last_error_status in (429, 500, 502, 503, 504)
-                    or any(
-                        marker in f"{type(e).__name__} {last_error_message}".upper()
-                        for marker in ("UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL")
-                    )
-                )
-                if transient_error and attempt == 0:
-                    remaining = model_deadline - asyncio.get_running_loop().time()
-                    retry_delay = min(
-                        8.0,
-                        0.75 * (2 ** attempt) + random.uniform(0.0, 0.5),
-                        max(0.0, remaining - 0.25),
-                    )
-                    if retry_delay > 0:
-                        await asyncio.sleep(retry_delay)
-                else:
-                    break
         if reply_text:
             break
         if stop_fallback:
@@ -2577,17 +3080,19 @@ async def chat_endpoint(
             detail = "Gemini đã vượt hạn mức hoặc giới hạn tốc độ."
         elif last_error_status in (401, 403):
             detail = "Gemini từ chối API key hoặc quyền truy cập."
-        elif last_error_status in (500, 502, 503, 504):
-            detail = "Dịch vụ Gemini đang tạm thời gặp sự cố. Hãy thử lại sau."
         elif last_error_type == "TimeoutError":
             detail = f"Gemini chưa phản hồi trong {GEMINI_REQUEST_TIMEOUT_SECONDS} giây."
+        elif last_error_status in (500, 502, 503, 504):
+            detail = "Dịch vụ Gemini đang tạm thời gặp sự cố. Hãy thử lại sau."
         else:
             detail = "Không gọi được Gemini; hệ thống sẽ thử chế độ dự phòng."
         logger.warning(
-            "Gemini unavailable; using system fallback: model=%s status=%s error_type=%s",
+            "Gemini unavailable; using system fallback: model=%s status=%s error_type=%s elapsed_seconds=%.1f tool_calls=%d",
             last_error_model,
             last_error_status or "unknown",
             last_error_type or "GeminiRequestError",
+            asyncio.get_running_loop().time() - request_started,
+            len(tool_call_trace),
         )
         return _return_system_fallback(
             background_tasks,
@@ -2599,6 +3104,8 @@ async def chat_endpoint(
             error_status=last_error_status,
             image_attached=bool(request.image_base64),
             history=request.history,
+            tool_calls=tool_call_trace,
+            elapsed_seconds=asyncio.get_running_loop().time() - request_started,
         )
 
     background_tasks.add_task(
@@ -2609,20 +3116,27 @@ async def chat_endpoint(
         intent="GEMINI_GIS_CHAT",
     )
 
+    # Lọc parcel_ids cho user thường
+    selected_parcel_ids = filter_parcel_ids_for_user(selected_parcel_ids, user_parcel_codes)
+
     return {
         "reply": reply_text,
         "parcel_ids": selected_parcel_ids,
         "sources": _extract_reply_sources(reply_text),
+        "fallback": False,
+        "mode": "gemini_tool" if tool_call_trace else "gemini",
+        "model": successful_model,
+        "tool_calls": tool_call_trace,
     }
 
 
-# Dữ liệu thửa đất dùng cho bản đồ
+# Dữ liệu thửa đất dùng cho bản đồ (user chỉ thấy thửa của mình, admin thấy tất cả)
 @app.get("/api/parcels/geojson", summary="Lấy ranh giới thửa đất để hiển thị bản đồ")
 def get_parcels_geojson(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    return parcel_feature_collection(db)
+    return parcel_feature_collection(db, current_user=current_user)
 
 
 @app.get("/api/objects/geojson", summary="Lấy đối tượng điểm (giếng, nhà kho) để hiển thị bản đồ")
@@ -2630,10 +3144,12 @@ def get_objects_geojson(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    if current_user.role != "admin":
+        return {"type": "FeatureCollection", "features": []}
     return object_feature_collection(db)
 
 
-# Các API GIS trực tiếp
+# Các API GIS truy vấn dữ liệu hệ thống (chỉ Admin)
 @app.get("/api/loc-thua")
 def api_loc_thua(
     dieu_kien: Optional[str] = Query(default=None),
@@ -2643,8 +3159,10 @@ def api_loc_thua(
     gan_doi_tuong: Optional[str] = Query(default=None),
     ban_kinh_m: Optional[float] = Query(default=None, ge=0),
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    return gis_loc_thua(
+    _require_admin_for_system_gis(current_user)
+    result = gis_loc_thua(
         dieu_kien=dieu_kien,
         cay_trong=cay_trong,
         do_am_toi_thieu=do_am_toi_thieu,
@@ -2652,25 +3170,40 @@ def api_loc_thua(
         gan_doi_tuong=gan_doi_tuong,
         ban_kinh_m=ban_kinh_m,
     )
+    if current_user.role != "admin":
+        result = _filter_gis_result_for_user(result, db, current_user.id)
+    return result
 
 @app.get("/api/thua-cuc-tri")
 def api_thua_cuc_tri(
     truong: str = "dien_tich",
     loai: str = "max",
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    return gis_thua_cuc_tri(truong, loai)
+    _require_admin_for_system_gis(current_user)
+    result = gis_thua_cuc_tri(truong, loai)
+    if current_user.role != "admin":
+        result = _filter_gis_result_for_user(result, db, current_user.id)
+    return result
 
 @app.get("/api/tong-dien-tich", summary="Tính tổng diện tích các thửa đất")
 def api_tinh_tong_dien_tich(
     dieu_kien: Optional[str] = Query(default=None, max_length=100),
     danh_sach_thua: Optional[list[str]] = Query(default=None),
+    cay_trong: Optional[str] = Query(default=None, max_length=100),
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    return gis_tinh_tong_dien_tich(
+    _require_admin_for_system_gis(current_user)
+    result = gis_tinh_tong_dien_tich(
         dieu_kien=dieu_kien,
         danh_sach_thua=danh_sach_thua,
+        cay_trong=cay_trong,
     )
+    if current_user.role != "admin":
+        result = _filter_gis_result_for_user(result, db, current_user.id)
+    return result
 
 @app.get("/api/thua-gan")
 def api_thua_gan(
@@ -2678,8 +3211,63 @@ def api_thua_gan(
     lon: float,
     ban_kinh_m: float = 500.0,
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    return gis_thua_gan(lat, lon, ban_kinh_m)
+    _require_admin_for_system_gis(current_user)
+    result = gis_thua_gan(lat, lon, ban_kinh_m)
+    if current_user.role != "admin":
+        result = _filter_gis_result_for_user(result, db, current_user.id)
+    return result
+
+
+def _filter_gis_result_for_user(result: dict, db: Session, user_id: int) -> dict:
+    """Lọc kết quả GIS chỉ giữ lại các thửa thuộc về user."""
+    user_codes = set(
+        c.strip().upper() for c in get_user_parcel_codes(db, user_id) if c
+    )
+    if not user_codes:
+        if "du_lieu" in result:
+            result["du_lieu"] = [] if isinstance(result.get("du_lieu"), list) else {}
+            result["tong_so"] = 0
+        if "parcel_ids" in result:
+            result["parcel_ids"] = []
+        if "so_thua" in result:
+            result["so_thua"] = 0
+        if "tong_dien_tich_m2" in result:
+            result["tong_dien_tich_m2"] = 0
+        return result
+
+    if isinstance(result.get("du_lieu"), list):
+        result["du_lieu"] = [
+            item for item in result["du_lieu"]
+            if str(item.get("id") or item.get("parcel_code") or "").strip().upper() in user_codes
+        ]
+        result["tong_so"] = len(result["du_lieu"])
+
+    if isinstance(result.get("parcel_ids"), list):
+        result["parcel_ids"] = [
+            pid for pid in result["parcel_ids"]
+            if str(pid).strip().upper() in user_codes
+        ]
+
+    if "so_thua" in result and isinstance(result.get("du_lieu"), list):
+        result["so_thua"] = len(result["du_lieu"])
+    if "tong_dien_tich_m2" in result and isinstance(result.get("du_lieu"), list):
+        result["tong_dien_tich_m2"] = round(
+            sum(float(item.get("dien_tich_m2") or item.get("dien_tich") or 0) for item in result["du_lieu"]),
+            2,
+        )
+
+    return result
+
+
+def _require_admin_for_system_gis(current_user: models.User) -> None:
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Dữ liệu GIS hệ thống chỉ dành cho Admin.",
+        )
+
 
 @app.get("/api/khoang-cach")
 def api_khoang_cach(
@@ -2687,6 +3275,7 @@ def api_khoang_cach(
     dt2: str,
     current_user: models.User = Depends(get_current_user),
 ):
+    _require_admin_for_system_gis(current_user)
     return gis_khoang_cach(dt1, dt2)
 
 @app.get("/api/vi-tri-doi-tuong")
@@ -2694,7 +3283,216 @@ def api_tim_vi_tri_doi_tuong(
     tu_khoa: str = Query(..., min_length=1, max_length=100),
     current_user: models.User = Depends(get_current_user),
 ):
+    _require_admin_for_system_gis(current_user)
     return gis_tim_vi_tri_doi_tuong(tu_khoa)
+
+
+# Lấy danh sách thửa của user hiện tại (admin có thể lọc theo user_id)
+@app.get("/api/parcels", summary="Lấy danh sách thửa đất của người dùng hiện tại")
+def list_user_parcels(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+    user_id: Optional[int] = Query(default=None, description="Chỉ admin: xem thửa của user khác"),
+):
+    query = db.query(models.Parcel)
+    if current_user.role == "admin" and user_id is not None:
+        query = query.filter(models.Parcel.user_id == user_id)
+    elif current_user.role != "admin":
+        query = query.filter(models.Parcel.user_id == current_user.id)
+    parcels = query.order_by(models.Parcel.id.asc()).all()
+    return {
+        "total": len(parcels),
+        "data": [parcel_to_feature(parcel, include_user=True) for parcel in parcels],
+    }
+
+
+# Tạo thửa mới (user tạo thửa gán cho chính mình)
+@app.post("/api/parcels", status_code=status.HTTP_201_CREATED, summary="Tạo thửa đất mới")
+def create_user_parcel(
+    data: ParcelCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    try:
+        geometry = validate_parcel_geometry(data.geometry)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    code = data.parcel_code.strip()
+    if not code:
+        raise HTTPException(status_code=422, detail="Mã thửa không được để trống.")
+    if db.query(models.Parcel).filter(models.Parcel.parcel_code == code).first():
+        raise HTTPException(status_code=409, detail="Mã thửa đã tồn tại.")
+
+    parcel = models.Parcel(
+        parcel_code=code,
+        name=data.name.strip(),
+        crop_type=data.crop_type.strip(),
+        geometry_geojson=json.dumps(geometry, ensure_ascii=False),
+        area_sqm=parcel_area_sqm(geometry),
+        moisture=data.moisture,
+        temperature=data.temperature,
+        notes=data.notes.strip() if data.notes else None,
+        user_id=current_user.id,
+    )
+    db.add(parcel)
+    try:
+        db.commit()
+        db.refresh(parcel)
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Mã thửa đã tồn tại.") from error
+    refresh_gis_cache(db)
+    return parcel_to_feature(parcel, include_user=True) | {"db_id": parcel.id}
+
+
+# Cập nhật thửa (chủ sở hữu hoặc admin)
+@app.put("/api/parcels/{parcel_id}", summary="Cập nhật thông tin thửa đất")
+def update_user_parcel(
+    parcel_id: int,
+    data: ParcelUpdateSchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    parcel = db.query(models.Parcel).filter(models.Parcel.id == parcel_id).first()
+    if not parcel:
+        raise HTTPException(status_code=404, detail="Không tìm thấy thửa đất.")
+
+    if current_user.role != "admin" and parcel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Bạn không có quyền cập nhật thửa đất này.")
+
+    updates = data.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="Không có thông tin nào được gửi để cập nhật.")
+
+    if "geometry" in updates and updates["geometry"] is not None:
+        try:
+            geometry = validate_parcel_geometry(updates["geometry"])
+            updates["geometry_geojson"] = json.dumps(geometry, ensure_ascii=False)
+            updates["area_sqm"] = parcel_area_sqm(geometry)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        del updates["geometry"]
+
+    for key, value in updates.items():
+        setattr(parcel, key, value)
+
+    try:
+        db.commit()
+        db.refresh(parcel)
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Mã thửa đã tồn tại.") from error
+    refresh_gis_cache(db)
+    return parcel_to_feature(parcel, include_user=True) | {"db_id": parcel.id}
+
+
+# Xóa thửa (chủ sở hữu hoặc admin)
+@app.delete("/api/parcels/{parcel_id}", summary="Xóa thửa đất")
+def delete_user_parcel(
+    parcel_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    parcel = db.query(models.Parcel).filter(models.Parcel.id == parcel_id).first()
+    if not parcel:
+        raise HTTPException(status_code=404, detail="Không tìm thấy thửa đất.")
+
+    if current_user.role != "admin" and parcel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Bạn không có quyền xóa thửa đất này.")
+
+    db.delete(parcel)
+    db.commit()
+    refresh_gis_cache(db)
+    return {"message": "Đã xóa thửa đất thành công"}
+
+
+# ------------------------------------------------------------------------------
+# 5b. API VỊ TRÍ GPS CỦA NGƯỜI DÙNG
+# ------------------------------------------------------------------------------
+
+class UserLocationUpdate(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Tính khoảng cách Haversine giữa hai tọa độ (mét)."""
+    R = 6_371_000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    )
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+@app.post("/api/user/location", summary="Lưu vị trí GPS hiện tại của người dùng")
+def save_user_location(
+    data: UserLocationUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if current_user.latitude is not None and current_user.longitude is not None:
+        khoang_cach = _haversine_m(
+            current_user.latitude,
+            current_user.longitude,
+            data.latitude,
+            data.longitude,
+        )
+        if khoang_cach < 30.0:
+            return {
+                "message": "Vị trí mới gần với vị trí trước (< 30 m), không cập nhật.",
+                "latitude": current_user.latitude,
+                "longitude": current_user.longitude,
+                "updated": False,
+            }
+
+    current_user.latitude = data.latitude
+    current_user.longitude = data.longitude
+    current_user.location_updated_at = datetime.utcnow()
+    db.commit()
+    return {
+        "message": "Đã cập nhật vị trí GPS.",
+        "latitude": current_user.latitude,
+        "longitude": current_user.longitude,
+        "updated": True,
+    }
+
+
+@app.get("/api/user/location", summary="Lấy vị trí GPS đã lưu của người dùng")
+def get_user_location(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return {
+        "latitude": current_user.latitude,
+        "longitude": current_user.longitude,
+        "location_updated_at": current_user.location_updated_at.isoformat() if current_user.location_updated_at else None,
+    }
+
+
+@app.get("/api/admin/users-with-location", summary="Danh sách user kèm vị trí GPS (chỉ admin)")
+def get_users_with_location(
+    db: Session = Depends(get_db),
+    current_admin: models.User = Depends(get_current_admin),
+):
+    users = db.query(models.User).order_by(models.User.id.asc()).all()
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "full_name": u.full_name,
+            "role": u.role,
+            "latitude": u.latitude,
+            "longitude": u.longitude,
+            "location_updated_at": u.location_updated_at.isoformat() if u.location_updated_at else None,
+            "parcel_count": db.query(models.Parcel).filter(models.Parcel.user_id == u.id).count(),
+        }
+        for u in users
+    ]
 
 
 # ------------------------------------------------------------------------------
@@ -2847,8 +3645,29 @@ def get_all_admin_chat_history(
     db: Session = Depends(get_db),
     current_admin: models.User = Depends(get_current_admin)
 ):
-    chats = db.query(models.ChatHistory).order_by(models.ChatHistory.id.desc()).all()
-    return {"total": len(chats), "data": chats}
+    chats = (
+        db.query(models.ChatHistory, models.User)
+        .outerjoin(models.User, models.ChatHistory.user_id == models.User.id)
+        .order_by(models.ChatHistory.id.desc())
+        .all()
+    )
+    return {
+        "total": len(chats),
+        "data": [
+            {
+                "id": chat.id,
+                "user_message": chat.user_message,
+                "bot_response": chat.bot_response,
+                "intent": chat.intent,
+                "created_at": chat.created_at.isoformat() if chat.created_at else None,
+                "user_id": chat.user_id,
+                "user_full_name": user.full_name if user else None,
+                "user_username": user.username if user else None,
+                "user_role": user.role if user else None,
+            }
+            for chat, user in chats
+        ],
+    }
 
 @admin_router.get("/summary")
 def get_admin_summary(
@@ -2913,10 +3732,32 @@ def grant_admin_role(
     db.commit()
     return {"message": f"Đã nâng cấp quyền Admin cho tài khoản {user.username}!"}
 
+
+
+@admin_router.delete("/delete-user/{user_id}", summary="Xóa tài khoản người dùng (chỉ admin)")
+def delete_user_account(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_admin: models.User = Depends(get_current_admin)
+):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Không tìm thấy người dùng này!")
+
+    # Không cho phép admin xóa chính mình
+    if user.id == current_admin.id:
+        raise HTTPException(status_code=400, detail="Không thể xóa tài khoản admin hiện đang đăng nhập!")
+
+    db.delete(user)
+    db.commit()
+    return {"message": f"Đã xóa tài khoản {user.username} thành công!"}
+
 app.include_router(admin_router)
 
-# Mount các file giao diện tĩnh (HTML, CSS, JS)
-app.mount("/", StaticFiles(directory=BASE_DIR, html=True), name="static")
+# Only the dedicated frontend assets directory may be mounted as a static tree.
+LEAFLET_DIR = os.path.join(BASE_DIR, "leaflet")
+if os.path.isdir(LEAFLET_DIR):
+    app.mount("/leaflet", StaticFiles(directory=LEAFLET_DIR), name="leaflet")
 
 
 # ------------------------------------------------------------------------------

@@ -108,22 +108,43 @@ LLM gọi hàm `get_weather("Hồ Chí Minh")`, nhận kết quả 27°C mưa r�
 
 ## 6. ỨNG DỤNG THỰC TẾ TRONG DỰ ÁN
 
-Trong dự án "Hệ thống Thời tiết & Vận chuyển hàng hóa", Function Calling được áp dụng như sau:
+Dự án là **Hệ thống AI bản đồ nông nghiệp**. Gemini có thể chọn các hàm backend đã
+được khai báo; backend kiểm tra tham số, thực thi truy vấn GIS và gửi kết quả lại cho
+mô hình để tạo câu trả lời. Mô hình không tự truy cập database.
 
-### 6.1 Công cụ du báo thời tiết (`tool_du_bao_thoi_tiet` trong `main.py`)
-- LLM nhận dạng thành phố từ câu hỏi của người dùng
-- Gọi API Open-Meteo / WTTR.in / OpenWeatherMap
-- Trả về nhiệt độ, độ ẩm, gió, mã thời tiết kèm nguồn tham khảo
+### 6.1 Các công cụ GIS
 
-### 6.2 Hệ thống vận chuyển hàng hóa
-- Kiểm tra địa chỉ giao hàng (GIS)
-- Cập nhật trạng thái đơn hàng trong database
-- Tính khoảng cách và ước lượng thời gian giao
+Các công cụ trong `main.py` bao gồm:
+
+- `tool_thong_tin_thua`: tra cứu thuộc tính theo mã thửa.
+- `tool_thua_cuc_tri`: tìm thửa có giá trị lớn nhất/nhỏ nhất theo diện tích hoặc độ ẩm.
+- `tool_tinh_tong_dien_tich`: tính tổng diện tích, có thể giới hạn theo cây trồng,
+  điều kiện hoặc danh sách thửa cụ thể.
+- `tool_loc_thua`: lọc đồng thời theo cây trồng, độ ẩm và khoảng cách tới đối tượng.
+- `tool_khoang_cach`, `tool_thua_gan`, `tool_tim_vi_tri_doi_tuong`: tra cứu khoảng cách,
+  thửa gần tọa độ và vị trí đối tượng bản đồ.
+
+### 6.2 Xác minh dữ liệu trước khi trả lời
+
+Với câu hỏi cần số liệu GIS, nội dung do Gemini tự tạo không được xem là dữ liệu đã
+xác minh. Hệ thống yêu cầu có ít nhất một lần gọi công cụ GIS thành công trước khi
+chấp nhận câu trả lời; nếu không, yêu cầu được chuyển sang bộ xử lý nội bộ. Một số câu
+hỏi phổ biến cũng được xử lý trực tiếp để giảm độ trễ khi Gemini không phản hồi.
+
+API chat trả về chế độ xử lý, model và dấu vết gọi công cụ (tên công cụ, tên tham số,
+trạng thái và số kết quả); giá trị tham số không được đưa vào dấu vết này.
+
+### 6.3 Công cụ thời tiết
+
+`tool_du_bao_thoi_tiet` là công cụ bổ sung, không phải mô tả chức năng vận chuyển.
+Khi được cấu hình, công cụ truy vấn thông tin thời tiết qua nguồn web và trả nguồn
+tham khảo.
 
 **Lợi ích trong dự án:**
-- Người dùng chat bằng tiếng Việt tự nhiên
-- Hệ thống tự động lấy dữ liệu thời tiết chính xác
-- Giảm thiểu sai sót do nhập liệu thủ công
+
+- Cho phép hỏi bằng tiếng Việt tự nhiên về các thửa và đối tượng bản đồ.
+- Dữ liệu GIS được lấy từ backend thay vì để mô hình tự suy đoán.
+- Có đường xử lý nội bộ cho một số yêu cầu khi dịch vụ Gemini không khả dụng.
 
 ---
 
@@ -145,7 +166,7 @@ Với Function Calling, LLM không còn chỉ là một công cụ trả lời c
 1. OpenAI Function Calling Documentation - https://platform.openai.com/docs/guides/function-calling
 2. Anthropic Tool Use Documentation - https://docs.anthropic.com/claude/docs/tool-use
 3. Gemini Function Calling Documentation - https://ai.google.dev/gemini-api/docs/function-calling
-4. Dự án Thời tiết & Vận chuyển hàng hóa (mã nguồn tại `D:\DuAnThucTap-main\DuAnThucTap-main\main.py`)
+4. Hệ thống AI bản đồ nông nghiệp (mã nguồn tại `main.py`)
 
 ---
 
@@ -153,4 +174,4 @@ Với Function Calling, LLM không còn chỉ là một công cụ trả lời c
 
 ---
 **File:** `BaoCao_Function_Calling.md`  
-**Vị trí:** `D:\DuAnThucTap-main\DuAnThucTap-main\BaoCao_Function_Calling.md`
+**Vị trí:** `BaoCao_Function_Calling.md`

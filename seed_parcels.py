@@ -1,4 +1,4 @@
-"""Import polygon features from data.json into SQL Server and sync stored areas."""
+"""Insert missing sample map features without overwriting user-managed records."""
 
 import json
 import math
@@ -22,13 +22,13 @@ def seed_parcels() -> None:
 
     db = SessionLocal()
     inserted = 0
-    updated = 0
+    codes_in_json = set()
     try:
         for feature in collection.get("features", []):
             properties = feature.get("properties") or {}
             code = str(properties.get("id") or "").strip()
-            if "codes_in_json" not in locals():
-                codes_in_json = set()
+            if not code:
+                continue
             codes_in_json.add(code)
             geometry = feature.get("geometry")
             if not code or not geometry or geometry.get("type") != "Polygon":
@@ -52,14 +52,6 @@ def seed_parcels() -> None:
                 .first()
             )
             if existing_parcel:
-                existing_parcel.name = str(properties.get("ten") or code)[:100]
-                existing_parcel.crop_type = str(properties.get("cay_trong") or "Chưa xác định")[:100]
-                existing_parcel.geometry_geojson = json.dumps(validated_geometry, ensure_ascii=False)
-                existing_parcel.area_sqm = area_sqm
-                existing_parcel.moisture = properties.get("do_am")
-                existing_parcel.temperature = properties.get("nhiet_do")
-                existing_parcel.notes = None
-                updated += 1
                 continue
 
             db.add(models.Parcel(
@@ -74,16 +66,6 @@ def seed_parcels() -> None:
             ))
             inserted += 1
 
-        # Xóa các thửa trong DB mà không còn tồn tại trong data.json (purge stale)
-        if codes_in_json:
-            deleted_parcels = (
-                db.query(models.Parcel)
-                .filter(~models.Parcel.parcel_code.in_(codes_in_json))
-                .delete(synchronize_session=False)
-            )
-        else:
-            deleted_parcels = db.query(models.Parcel).delete(synchronize_session=False)
-
         db.commit()
     except (IntegrityError, ValueError, TypeError):
         db.rollback()
@@ -92,16 +74,13 @@ def seed_parcels() -> None:
         db.close()
 
     print(
-        f"Đã nhập {inserted} thửa mới, cập nhật {updated} thửa, xóa {deleted_parcels} thửa cũ "
-        f"(tổng {len(codes_in_json)} mã trong data.json)."
+        f"Đã thêm {inserted} thửa mẫu còn thiếu; giữ nguyên dữ liệu thửa đã có "
+        f"(data.json chứa {len(codes_in_json)} mã)."
     )
 
-    # --- Đồng bộ đối tượng bản đồ (giếng, nhà kho) từ data.json ---
-    # Hỗ trợ: thêm mới, cập nhật (upsert), và xóa những record trong DB không còn có trong file JSON.
+    # Add sample objects that do not yet exist; preserve existing database records.
     db_objects = SessionLocal()
     inserted_objects = 0
-    updated_objects = 0
-    deleted_objects = 0
     codes_in_json = set()
 
     try:
@@ -135,27 +114,12 @@ def seed_parcels() -> None:
             }
 
             if existing_object:
-                existing_object.name = payload["name"]
-                existing_object.object_type = payload["object_type"]
-                existing_object.description = payload["description"]
-                existing_object.geometry_geojson = payload["geometry_geojson"]
-                updated_objects += 1
-            else:
-                db_objects.add(models.MapObject(
-                    object_code=code,
-                    **payload,
-                ))
-                inserted_objects += 1
-
-        # Xóa các record trong DB mà không còn tồn tại trong data.json (purge stale)
-        if codes_in_json:
-            deleted_objects = (
-                db_objects.query(models.MapObject)
-                .filter(~models.MapObject.object_code.in_(codes_in_json))
-                .delete(synchronize_session=False)
-            )
-        else:
-            deleted_objects = db_objects.query(models.MapObject).delete(synchronize_session=False)
+                continue
+            db_objects.add(models.MapObject(
+                object_code=code,
+                **payload,
+            ))
+            inserted_objects += 1
 
         db_objects.commit()
     except (IntegrityError, ValueError, TypeError):
@@ -165,8 +129,8 @@ def seed_parcels() -> None:
         db_objects.close()
 
     print(
-        f"Đồng bộ đối tượng bản đồ: thêm {inserted_objects}, cập nhật {updated_objects}, "
-        f"xóa {deleted_objects} (tổng {len(codes_in_json)} mã trong data.json)."
+        f"Đã thêm {inserted_objects} đối tượng mẫu còn thiếu; giữ nguyên đối tượng đã có "
+        f"(data.json chứa {len(codes_in_json)} mã)."
     )
 
 

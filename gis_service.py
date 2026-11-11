@@ -141,7 +141,7 @@ def _find_parcel_indices_by_identifier(
     ]
     ordinal_pattern = (
         r"(?:(?:thua(?:\s+(?:dat|so|thu))?(?:\s+(?:so|thu))?|parcel)"
-        r"\s*#?\s*)?0*(\d+)"
+        r"\s*#?\s*)?(?:t\s*#?\s*)?0*(\d+)"
     )
     if len(exact_matches) or not (number_match := re.fullmatch(ordinal_pattern, identifier)):
         return exact_matches
@@ -425,6 +425,7 @@ def thua_cuc_tri(
 def tinh_tong_dien_tich(
     dieu_kien: Optional[str] = None,
     danh_sach_thua: Optional[list[str]] = None,
+    cay_trong: Optional[str] = None,
 ):
     _, parcelas = _require_gis_data()
     if danh_sach_thua is not None:
@@ -467,6 +468,16 @@ def tinh_tong_dien_tich(
     if dieu_kien and dieu_kien.strip():
         keyword = clean_text(dieu_kien)
         parcelas = parcelas[parcelas["_search_text"].str.contains(keyword, regex=False, na=False)]
+
+    if cay_trong and cay_trong.strip():
+        crop_column = next(
+            (column for column in ("cay_trong", "loai_nong_san", "loai_dat") if column in parcelas.columns),
+            None,
+        )
+        if crop_column is None:
+            raise HTTPException(status_code=422, detail="Dữ liệu thửa đất không có thuộc tính cây trồng.")
+        crop_values = parcelas[crop_column].apply(clean_text)
+        parcelas = parcelas[crop_values.str.contains(clean_text(cay_trong), regex=False, na=False)]
 
     selected_parcels = [
         {
@@ -540,18 +551,23 @@ def khoang_cach(dt1: str, dt2: str):
     ]
 
     def matching_objects(keyword):
-        if keyword.startswith(("thua", "parcel")) and not re.fullmatch(
-            r"(?:thua|parcel)\s*#?\s*0*\d+",
+        normalized_keyword = re.sub(
+            r"^(?:thua|parcel)\s+(?=t\s*#?\s*\d+)",
+            "",
             keyword,
-        ):
-            return parcels
+        )
         parcel_matches = _find_parcel_indices_by_identifier(
             parcels,
-            keyword,
+            normalized_keyword,
             parcel_identifier_columns,
         )
         if len(parcel_matches):
             return parcels.loc[parcel_matches]
+        if keyword.startswith(("thua", "parcel")) and re.fullmatch(
+            r"(?:thua|parcel)\s*#?\s*(?:t\s*#?\s*)?0*\d+",
+            keyword,
+        ):
+            return parcels.iloc[0:0]
         return _find_object_matches(objects, keyword)
 
     g1 = matching_objects(k1)
@@ -597,4 +613,3 @@ def khoang_cach(dt1: str, dt2: str):
         "khoang_cach_met": round(distance, 2),
         "parcel_ids": parcel_ids,
     }
-

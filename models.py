@@ -15,10 +15,15 @@ class User(Base):
     role = Column(NVARCHAR(20), default="user", nullable=False)                # Vai trò: "admin" hoặc "user"
     is_active = Column(Boolean, default=True)                                # Trạng thái hoạt động
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Vị trí GPS lần cập nhật gần nhất
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    location_updated_at = Column(DateTime, nullable=True)
 
-    # Quan hệ liên kết tới lịch sử chat và nhật ký
+    # Quan hệ liên kết tới lịch sử chat, nhật ký và thửa đất
     chat_histories = relationship("ChatHistory", back_populates="user")
     crop_logs = relationship("CropLog", back_populates="user")
+    parcels = relationship("Parcel", back_populates="user")
 
 
 # Bảng 2: Lưu lịch sử trò chuyện Chatbot
@@ -65,6 +70,9 @@ class Parcel(Base):
     notes = Column(NVARCHAR(None), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # Người sở hữu thửa đất
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    user = relationship("User", back_populates="parcels")
 
 
 # Bảng 4: Lưu đối tượng điểm trên bản đồ (giữa: giếng, nhà kho, ...)
