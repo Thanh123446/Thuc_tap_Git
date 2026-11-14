@@ -57,3 +57,34 @@ Desktop.ini
 
 # Keep the maintained regression suite under version control.
 !tests/*.py
+# VS Code and local caches
+.vscode/
+.pytest_cache/
+
+# One-off debug/fix/verify helper scripts (generated during troubleshooting)
+check_*.py
+check_mapstage*.py
+debug_section*.py
+fix_html*.py
+move_farm_overview*.py
+print_segment*.py
+write_mapstage.py
+write_segment.py
+replace_body.py
+extract_body.py
+find_farm_end.py
+find_positions.py
+cleanup_farm.py
+clean_mapstage.py
+restore_farm.py
+verify_all_changes.py
+
+# Debug/output artifacts
+*_debug*.txt
+body_debug.txt
+segment_debug.txt
+mapstage_debug*.txt
+
+# Local HTML backups/snapshots
+index_backup.html
+index_from_git.html

@@ -17,6 +17,8 @@
     <!-- FontAwesome Icons & Leaflet CSS -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 
     <style>
         :root {
@@ -61,16 +63,21 @@
         }
 
         .action-bar {
-            background: var(--panel-bg);
-            border-bottom: 1px solid var(--border-color);
-            padding: 8px 20px;
+            position: fixed;
+            top: 75px;
+            left: 60px;
+            z-index: 1000;
             display: flex;
-            justify-content: flex-start;
-            align-items: center;
-            gap: 12px;
+            gap: 10px;
+            background: rgba(255,255,255,0.97);
+            padding: 8px 14px;
+            border-radius: 12px;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(0,0,0,0.06);
             flex-wrap: wrap;
-            z-index: 10;
-            min-height: 48px;
+            min-height: auto;
+            max-width: calc(100vw - 460px);
         }
 
         .btn-action {
@@ -100,45 +107,50 @@
         }
 
         .position-spot {
-            position: absolute;
-            right: 14px;
-            bottom: 14px;
-            z-index: 600;
-            min-width: 64px;
-            padding: 8px 12px;
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            background: var(--panel-bg);
+            position: fixed;
+            left: 10px;
+            bottom: 30px;
+            z-index: 1000;
+            width: 48px;
+            height: 48px;
+            padding: 0;
+            border: 2px solid var(--primary-color);
+            border-radius: 50%;
+            background: white;
             color: var(--primary-color);
             cursor: pointer;
-            display: flex;
-            flex-direction: column;
+            display: inline-flex;
             align-items: center;
-            gap: 4px;
-            box-shadow: 0 4px 14px var(--shadow-color);
-            transition: transform 0.2s, box-shadow 0.2s;
+            justify-content: center;
+            gap: 0;
+            box-shadow: 0 4px 12px var(--shadow-color);
+        }
+        .position-spot .position-text {
+            display: none;
         }
 
         .position-spot:hover {
             transform: translateY(-2px);
-            box-shadow: 0 6px 20px var(--shadow-color);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+        }
+
+        .position-spot .pin-icon {
+            font-size: 22px;
+            color: var(--primary-color);
+            transition: color 0.25s ease;
+        }
+
+        body[data-theme="dark"] .position-spot {
+            background: var(--panel-bg);
+            color: #86efac;
+            border-color: #86efac;
         }
 
         .position-spot .pin-icon {
             font-size: 20px;
         }
 
-        .position-text {
-            max-width: 180px;
-            margin-top: 0;
-            overflow: hidden;
-            color: var(--muted-color);
-            font-size: 11px;
-            font-weight: 600;
-            text-align: center;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
+        
 
         .btn-action.is-active {
             background: var(--primary-color);
@@ -151,10 +163,7 @@
             font-size: 12px;
         }
 
-        body[data-theme="dark"] .position-spot {
-            background: var(--panel-bg);
-            color: var(--muted-color);
-        }
+
         /* ====== Add Parcel Modal ====== */
         .modal-overlay {
             display: none;
@@ -399,7 +408,7 @@
         }
 
         .farm-overview {
-            top: 14px;
+            top: 70px;
             left: 60px;
             padding: 14px;
         }
@@ -701,11 +710,43 @@
             color: var(--muted-color);
             font-size: 11px;
         }
+        .crop-pie-wrap {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 8px 0 12px;
+        }
+        .crop-pie-chart {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            flex: 0 0 120px;
+            border: 1px solid var(--border-color);
+            background: var(--surface-bg);
+        }
+        .crop-pie-legend {
+            display: grid;
+            gap: 4px;
+            font-size: 12px;
+            color: var(--text-color);
+            min-width: 0;
+        }
+        .crop-pie-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+        }
+        .crop-pie-legend-item span:last-child {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
 
         /* Chat Panel Sidebar */
         .chat-panel {
-            width: clamp(360px, 32vw, 520px);
-            flex: 0 0 clamp(360px, 32vw, 520px);
+            width: clamp(300px, 22vw, 380px);
+            flex: 0 0 clamp(300px, 22vw, 380px);
             background: var(--panel-bg);
             border-left: 1px solid var(--border-color);
             display: flex;
@@ -1073,6 +1114,7 @@
         </div>
     </div>
 
+    <!-- Action Bar - moved inside header area for better layout -->
     <div class="action-bar" aria-label="Chức năng bản đồ">
         <button class="btn-action" id="parcelDrawToggle" type="button" onclick="addNewParcel()" aria-pressed="false">
             <i class="fa-solid fa-draw-polygon" aria-hidden="true"></i>
@@ -1085,16 +1127,12 @@
         <span class="draw-status" id="drawStatus" role="status" aria-live="polite"></span>
     </div>
 
-    <!-- Main Container -->
+<!-- Main Container -->
     <div class="app-container">
         <!-- Interactive Leaflet Map -->
         <div class="map-stage">
             <div id="map"></div>
-            <button class="position-spot" id="positionSpot" type="button" title="Lấy vị trí hiện tại">
-                <i class="fa-solid fa-location-crosshairs pin-icon" aria-hidden="true"></i>
-                <span class="position-text" id="positionText">Vị trí</span>
-            </button>
-
+            
             <section class="farm-overview is-collapsed" id="farmOverview" aria-labelledby="overviewTitle">
                 <h2 class="overview-title">
                     <button class="panel-toggle" id="overviewToggle" type="button" aria-expanded="false" aria-controls="overviewContent" onclick="togglePanel('farmOverview', 'overviewContent', 'overviewToggle')">
@@ -1120,6 +1158,14 @@
                             <span>Loại nông sản</span>
                         </div>
                     </div>
+                    <h3 class="chart-heading">Biểu đồ nông sản</h3>
+                    <div id="cropPieChart" class="crop-pie-wrap" role="img" aria-label="Biểu đồ tỷ lệ loại nông sản">
+                        <p class="chart-empty">Đang tải dữ liệu nông trại...</p>
+                    </div>
+                    <h3 class="chart-heading">Biểu đồ nông sản</h3>
+                    <div id="cropPieChart" class="crop-pie-wrap" role="img" aria-label="Biểu đồ tỷ lệ loại nông sản">
+                        <p class="chart-empty">Đang tải dữ liệu nông trại...</p>
+                    </div>
                     <h3 class="chart-heading">Số thửa theo loại nông sản</h3>
                     <div id="cropChart" role="img" aria-label="Biểu đồ số thửa theo từng loại nông sản">
                         <p class="chart-empty">Đang tải dữ liệu nông trại...</p>
@@ -1137,11 +1183,11 @@
                         <div class="alert-list" id="farmAlertList" aria-live="polite">
                             <p class="chart-empty">Đang kiểm tra dữ liệu...</p>
                         </div>
-                        <p class="alert-threshold-note">Ngưỡng tham khảo chung: độ ẩm &lt; 30% hoặc &gt; 80%; nhiệt độ &lt; 10°C hoặc &gt; 35°C. Nên điều chỉnh theo từng loại cây.</p>
+                        <p class="alert-threshold-note">Ngưỡng tham khảo chung: độ ẩm < 30% hoặc > 80%; nhiệt độ < 10°C hoặc > 35°C. Nên điều chỉnh theo từng loại cây.</p>
                     </section>
                 </div>
             </section>
-
+            
             <section class="crop-legend is-collapsed" id="cropLegend" aria-labelledby="legendTitle">
                 <h2 class="legend-title">
                     <button class="panel-toggle" id="legendToggle" type="button" aria-expanded="false" aria-controls="legendContent" onclick="togglePanel('cropLegend', 'legendContent', 'legendToggle')">
@@ -1167,7 +1213,7 @@
 
         <!-- AI Chatbot Sidebar -->
         <div class="chat-resizer" id="chatResizer" role="separator" aria-label="Điều chỉnh độ rộng khung chat" aria-orientation="vertical"></div>
-<div class="chat-panel" id="chatPanel">
+        <div class="chat-panel" id="chatPanel">
             <div class="chat-header">
                 <i class="fa-solid fa-robot"></i> Trợ Lý AI Nông Nghiệp (Gemini)
             </div>
@@ -1203,6 +1249,12 @@
         </div>
     </div>
 
+    <!-- Position Spot - góc dưới phải màn hình -->
+    <button class="position-spot" id="positionSpot" type="button" title="Lấy vị trí hiện tại">
+        <i class="fa-solid fa-location-crosshairs pin-icon" aria-hidden="true"></i>
+        <span class="position-text" id="positionText"></span>
+    </button>
+
     <div class="modal-overlay" id="modalOverlay">
         <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="parcelModalTitle">
             <div class="modal-header">
@@ -1233,6 +1285,16 @@
                         <option value="Khác">Khác</option>
                     </select>
                 </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="parcelMoisture">Độ ẩm (%)</label>
+                        <input type="number" id="parcelMoisture" placeholder="VD: 65" min="0" max="100" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label for="parcelTemperature">Nhiệt độ (°C)</label>
+                        <input type="number" id="parcelTemperature" placeholder="VD: 28" min="-100" max="100" step="0.1">
+                    </div>
+                </div>
                 <div class="form-group">
                     <label for="parcelNotes">Ghi chú</label>
                     <textarea id="parcelNotes" rows="3" placeholder="Ghi chú thêm..."></textarea>
@@ -1247,7 +1309,7 @@
     </div>
 
     <!-- Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
     <script src="/auth.js"></script>
     <script src="/script.js"></script>
@@ -1265,6 +1327,8 @@
         const alertThresholds = { minMoisture: 30, maxMoisture: 80, minTemperature: 10, maxTemperature: 35 };
         let farmFeatures = [];
         let activeCropFilter = null;
+        let parcelClusterGroup = null;
+        const PARCEL_CLUSTER_ZOOM = 15;
 
         function initChatResizer() {
             const resizer = document.getElementById('chatResizer');
@@ -1577,6 +1641,44 @@
             document.getElementById('totalArea').textContent = `${areaFormatter.format(totalArea)} m²`;
             document.getElementById('cropTypeCount').textContent = areaFormatter.format(sortedCrops.length);
 
+            const pieWrap = document.getElementById('cropPieChart');
+            pieWrap.replaceChildren();
+            if (sortedCrops.length === 0) {
+                pieWrap.appendChild(createTextElement('p', 'chart-empty', 'Chưa có dữ liệu nông trại.'));
+            } else {
+                const totalCount = Math.max(1, validFeatures.length);
+                let acc = 0;
+                const segments = sortedCrops
+                    .slice()
+                    .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0], 'vi'))
+                    .map(([cropName, stats]) => {
+                        const start = (acc / totalCount) * 360;
+                        acc += stats.count;
+                        const end = (acc / totalCount) * 360;
+                        return { cropName, count: stats.count, color: cropColors.get(cropName), start, end };
+                    });
+                const pie = document.createElement('div');
+                pie.className = 'crop-pie-chart';
+                pie.style.background = `conic-gradient(${segments.map(s => `${s.color} ${s.start}deg ${s.end}deg`).join(', ')})`;
+                pie.title = segments.map(s => `${s.cropName}: ${s.count} thửa`).join(', ');
+                pieWrap.appendChild(pie);
+
+                const legend = document.createElement('div');
+                legend.className = 'crop-pie-legend';
+                segments.forEach(s => {
+                    const item = document.createElement('div');
+                    item.className = 'crop-pie-legend-item';
+                    const swatch = document.createElement('span');
+                    swatch.className = 'legend-swatch';
+                    swatch.style.backgroundColor = s.color;
+                    swatch.setAttribute('aria-hidden', 'true');
+                    const pct = Math.round((s.count / totalCount) * 100);
+                    item.append(swatch, createTextElement('span', '', `${s.cropName} (${s.count} - ${pct}%)`));
+                    legend.appendChild(item);
+                });
+                pieWrap.appendChild(legend);
+            }
+
             const chart = document.getElementById('cropChart');
             chart.replaceChildren();
             if (sortedCrops.length === 0) {
@@ -1690,6 +1792,7 @@
                 }
                 renderFarmOverview(geojsonData.features);
                 if (geojsonLayer) map.removeLayer(geojsonLayer);
+                if (parcelClusterGroup) parcelClusterGroup.clearLayers();
 
                 geojsonLayer = L.geoJSON(geojsonData, {
                     style: function(feature) {
@@ -1724,16 +1827,73 @@
                             Number.isInteger(Number(props.db_id)) &&
                             Number(props.db_id) > 0
                         ) {
-                            layer.on('popupopen', event => {
+                        layer.on('popupopen', event => {
                                 const content = event.popup.getElement().querySelector('.leaflet-popup-content');
                                 if (!content || content.querySelector('.edit-parcel-button')) return;
-                                const button = document.createElement('button');
-                                button.type = 'button';
-                                button.className = 'btn-action edit-parcel-button';
-                                button.textContent = 'Sửa thửa của tôi';
-                                button.addEventListener('click', () => editParcel(feature));
-                                content.appendChild(button);
+                                if (Number.isInteger(Number(props.db_id)) && Number(props.db_id) > 0) {
+                                    const button = document.createElement('button');
+                                    button.type = 'button';
+                                    button.className = 'btn-action edit-parcel-button';
+                                    button.textContent = 'Sửa thửa của tôi';
+                                    button.addEventListener('click', () => editParcel(feature));
+                                    content.appendChild(button);
+
+                                    const delButton = document.createElement('button');
+                                    delButton.type = 'button';
+                                    delButton.className = 'btn-action delete-parcel-button';
+                                    delButton.textContent = 'Xóa thửa của tôi';
+                                    delButton.style.marginLeft = '6px';
+                                    delButton.addEventListener('click', () => deleteParcel(props.db_id));
+                                    content.appendChild(delButton);
+                                }
                             });
+                        }
+
+                        if (parcelClusterGroup && feature.geometry && ['Polygon', 'MultiPolygon'].includes(feature.geometry.type)) {
+                            let center;
+                            try {
+                                if (typeof layer.getBounds === 'function') {
+                                    center = layer.getBounds().getCenter();
+                                }
+                            } catch (_) {}
+                            if (!center && typeof L.geoJSON === 'function') {
+                                try { center = L.geoJSON(feature).getBounds().getCenter(); } catch (_) {}
+                            }
+                            if (center) {
+                                const fillColor = getColorByCrop(getCropName(props));
+                                const marker = L.circleMarker(center, {
+                                    radius: 8,
+                                    color: '#ffffff',
+                                    weight: 2,
+                                    fillColor,
+                                    fillOpacity: 0.95
+                                });
+                                const rows = Object.keys(props)
+                                    .map(key => `<b>${escapeHTML(key)}:</b> ${escapeHTML(props[key])}`)
+                                    .join('<br>');
+                                marker.bindPopup(`<div style="font-size: 13px;"><b>THÔNG TIN ĐỐI TƯỢNG</b><hr style="margin: 4px 0;">${rows}</div>`);
+                                marker.on('popupopen', event => {
+                                    const content = event.popup.getElement().querySelector('.leaflet-popup-content');
+                                    if (!content || content.querySelector('.edit-parcel-button')) return;
+                                    if (Number.isInteger(Number(props.db_id)) && Number(props.db_id) > 0) {
+                                        const button = document.createElement('button');
+                                        button.type = 'button';
+                                        button.className = 'btn-action edit-parcel-button';
+                                        button.textContent = 'Sửa thửa của tôi';
+                                        button.addEventListener('click', () => editParcel(feature));
+                                        content.appendChild(button);
+
+                                        const delButton = document.createElement('button');
+                                        delButton.type = 'button';
+                                        delButton.className = 'btn-action delete-parcel-button';
+                                        delButton.textContent = 'Xóa thửa của tôi';
+                                        delButton.style.marginLeft = '6px';
+                                        delButton.addEventListener('click', () => deleteParcel(props.db_id));
+                                        content.appendChild(delButton);
+                                    }
+                                });
+                                parcelClusterGroup.addLayer(marker);
+                            }
                         }
                     }
                 }).addTo(map);
@@ -1747,6 +1907,8 @@
                 document.getElementById('totalParcels').textContent = '—';
                 document.getElementById('totalArea').textContent = '—';
                 document.getElementById('cropTypeCount').textContent = '—';
+                const pieEl = document.getElementById('cropPieChart');
+                if (pieEl) pieEl.replaceChildren(createTextElement('p', 'chart-empty', 'Không thể tải dữ liệu nông trại.'));
                 document.getElementById('cropChart').replaceChildren(
                     createTextElement('p', 'chart-empty', 'Không thể tải dữ liệu nông trại.')
                 );
@@ -1816,11 +1978,24 @@
         function initMap() {
             // Tọa độ mặc định (Mặt bằng chung)
             map = L.map('map').setView([19.974, 105.954], 17);
+            hasUserNavigatedMap = false;
+            map.on('movestart zoomstart', () => { hasUserNavigatedMap = true; });
 
             L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
                 maxZoom: 19,
                 attribution: 'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
             }).addTo(map);
+
+            if (typeof L.markerClusterGroup === 'function') {
+                parcelClusterGroup = L.markerClusterGroup({
+                    disableClusteringAtZoom: PARCEL_CLUSTER_ZOOM,
+                    maxClusterRadius: 70,
+                    spiderfyOnMaxZoom: false,
+                    showCoverageOnHover: false,
+                    zoomToBoundsOnClick: true
+                });
+                map.addLayer(parcelClusterGroup);
+            }
 
             loadGeoJSONToMap();
             loadObjectsToMap();

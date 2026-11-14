@@ -1,4 +1,4 @@
-﻿// --- 0. LẤY THÔNG TIN NGƯỜI DÙNG ĐĂNG NHẬP ---
+// --- 0. LẤY THÔNG TIN NGƯỜI DÙNG ĐĂNG NHẬP ---
 // currentUser và authToken đã được khai báo trong auth guard của index.html
 
 // --- 1. KHỞI TẠO BẢN ĐỒ ---
@@ -675,10 +675,14 @@ async function onParcelFormSubmit(event) {
 
     const submitButton = document.querySelector('#parcelForm button[type="submit"]');
     if (submitButton) submitButton.disabled = true;
+    const moistureRaw = document.getElementById('parcelMoisture').value;
+    const temperatureRaw = document.getElementById('parcelTemperature').value;
     const payload = {
         parcel_code: document.getElementById('parcelCode').value.trim(),
         name: document.getElementById('parcelName').value.trim(),
         crop_type: document.getElementById('cropType').value,
+        moisture: moistureRaw === '' ? null : parseFloat(moistureRaw),
+        temperature: temperatureRaw === '' ? null : parseFloat(temperatureRaw),
         notes: document.getElementById('parcelNotes').value.trim() || null,
     };
     if (pendingParcelGeometry) payload.geometry = pendingParcelGeometry;
@@ -795,12 +799,37 @@ function editParcel(feature) {
         cropSelect.appendChild(customOption);
         cropSelect.value = cropType;
     }
+    const moisture = properties.do_am ?? properties.moisture;
+    const temperature = properties.nhiet_do ?? properties.temperature;
+    document.getElementById('parcelMoisture').value = (moisture !== null && moisture !== undefined && moisture !== '') ? moisture : '';
+    document.getElementById('parcelTemperature').value = (temperature !== null && temperature !== undefined && temperature !== '') ? temperature : '';
     document.getElementById('parcelNotes').value = properties.ghi_chu || properties.notes || '';
     document.getElementById('parcelModalTitle').textContent = `Sửa thửa ${properties.id || ''}`;
     document.getElementById('parcelGeometryHint').textContent =
         'Bạn có thể sửa thông tin rồi lưu ngay, hoặc chọn “Vẽ lại ranh giới” để thay đổi hình dạng thửa.';
     document.getElementById('redrawParcelButton').hidden = false;
     document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function deleteParcel(parcelId) {
+    if (!confirm('Bạn chắc chắn muốn xóa thửa đất này? Hành động không thể hoàn tác!')) return;
+
+    try {
+        const response = await apiFetch(`/api/parcels/${parcelId}`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(result.detail || `Không thể xóa thửa (mã lỗi ${response.status}).`);
+        }
+        alert(result.message || 'Đã xóa thửa đất thành công!');
+        closeParcelModal();
+        await loadGeoJSONToMap();
+    } catch (error) {
+        console.error('Lỗi xóa thửa:', error);
+        alert(error.message || 'Lỗi kết nối máy chủ.');
+    }
 }
 
 function redrawEditedParcel() {
