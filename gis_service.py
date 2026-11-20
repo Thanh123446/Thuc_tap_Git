@@ -102,7 +102,7 @@ def _index_geodataframe(gdf: gpd.GeoDataFrame) -> None:
 def _parcel_ids(frame: gpd.GeoDataFrame) -> list[str]:
     ids = []
     for index, row in frame.iterrows():
-        value = row.get("id", row.get("parcel_code", row.get("ten", index)))
+        value = row.get("parcel_code", row.get("id", row.get("ten", index)))
         if pd.isna(value):
             continue
         ids.append(str(value))
@@ -195,6 +195,25 @@ def thong_tin_thua(identifier: str) -> dict:
         normalized_identifier,
         identifier_columns,
     )
+    if len(matches) == 0:
+        # Fallback: tìm gần đúng theo tên/mã (chứa chuỗi) để hỗ trợ "thửa Nam"...
+        contains_mask = parcels[identifier_columns].apply(
+            lambda row: any(normalized_identifier in clean_text(value) for value in row if value is not None and str(value).strip() != ""),
+            axis=1,
+        )
+        matches = parcels.index[contains_mask]
+        if len(matches) > 1:
+            # ưu tiên khớp chính xác cột ten/name
+            name_cols = [c for c in ("ten", "name") if c in parcels.columns]
+            if name_cols:
+                exact_name = parcels.index[
+                    parcels[name_cols].apply(
+                        lambda row: any(clean_text(value) == normalized_identifier for value in row),
+                        axis=1,
+                    )
+                ]
+                if len(exact_name) == 1:
+                    matches = exact_name
     if len(matches) == 0:
         raise HTTPException(
             status_code=404,
@@ -422,6 +441,59 @@ def thua_cuc_tri(
     }
 
 
+def thua_cuc_tri_nhieu(
+    truong: str = "dien_tich",
+    loai: str = "max",
+    so_luong: int = 2,
+):
+    """Trả về N thửa có giá trị lớn nhất/nhỏ nhất theo trường chỉ định."""
+    _, parcels = _require_gis_data()
+    normalized_type = clean_text(loai)
+    if normalized_type not in {"max", "min", "lon_nhat", "nho_nhat"}:
+        raise HTTPException(status_code=422, detail="Loại cực trị chỉ nhận 'max' hoặc 'min'.")
+
+    field_aliases = {
+        "dien_tich": "dien_tich_m2",
+        "dien_tich_m2": "dien_tich_m2",
+        "area_sqm": "dien_tich_m2",
+        "area": "dien_tich_m2",
+        "do_am": "do_am",
+        "do_am_pct": "do_am_pct",
+        "humidity": "humidity",
+        "nhiet_do": "nhiet_do",
+        "temperature": "temperature",
+    }
+    normalized_field = clean_text(truong)
+    col = field_aliases.get(normalized_field, normalized_field)
+    allowed_columns = {"dien_tich_m2", "do_am", "do_am_pct", "humidity", "nhiet_do", "temperature"}
+    if col not in allowed_columns or col not in parcels.columns:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Trường cực trị '{truong}' không hợp lệ hoặc không có trong dữ liệu thửa đất.",
+        )
+
+    numeric_values = pd.to_numeric(parcels[col], errors="coerce")
+    valid = parcels[numeric_values.notna()].copy()
+    if valid.empty:
+        raise HTTPException(status_code=422, detail=f"Cột '{col}' không chứa dữ liệu số hợp lệ.")
+
+    ascending = normalized_type in {"min", "nho_nhat"}
+    valid = valid.assign(_sort_val=pd.to_numeric(valid[col], errors="coerce"))
+    valid = valid.sort_values("_sort_val", ascending=ascending)
+    n = max(1, min(int(so_luong or 2), len(valid)))
+    selected = valid.head(n)
+    cols = [column for column in parcels.columns if column not in ["geometry", "_search_text"]]
+    records = selected[cols].fillna("").to_dict(orient="records")
+    return {
+        "loai": "MIN" if ascending else "MAX",
+        "truong": col,
+        "so_luong": n,
+        "parcel_ids": _parcel_ids(selected),
+        "du_lieu": records,
+        "tong_so": len(records),
+    }
+
+
 def tinh_tong_dien_tich(
     dieu_kien: Optional[str] = None,
     danh_sach_thua: Optional[list[str]] = None,
@@ -535,6 +607,68 @@ def thua_gan(
         "tong_so": len(res),
         "parcel_ids": _parcel_ids(res.head(10)),
         "du_lieu": records
+    }
+
+
+def thua_gan_nhat(identifier: str, so_luong: int = 1) -> dict:
+    """Tìm thửa gần thửa chỉ định nhất (theo khoảng cách hình học)."""
+    _, parcels = _require_gis_data()
+    normalized_identifier = clean_text(identifier or "")
+    if not normalized_identifier:
+        raise HTTPException(status_code=422, detail="Cần nhập mã hoặc tên thửa.")
+
+    identifier_columns = [
+        column for column in ("id", "ten", "parcel_code", "name")
+        if column in parcels.columns
+    ]
+    if not identifier_columns:
+        raise HTTPException(status_code=422, detail="Dữ liệu thửa đất chưa có mã hoặc tên để tra cứu.")
+
+    matches = _find_parcel_indices_by_identifier(parcels, normalized_identifier, identifier_columns)
+    if len(matches) == 0:
+        contains_mask = parcels[identifier_columns].apply(
+            lambda row: any(
+                normalized_identifier in clean_text(value)
+                for value in row
+                if value is not None and str(value).strip() != ""
+            ),
+            axis=1,
+        )
+        matches = parcels.index[contains_mask]
+        if len(matches) > 1:
+            name_cols = [c for c in ("ten", "name") if c in parcels.columns]
+            if name_cols:
+                exact_name = parcels.index[
+                    parcels[name_cols].apply(
+                        lambda row: any(clean_text(value) == normalized_identifier for value in row),
+                        axis=1,
+                    )
+                ]
+                if len(exact_name) == 1:
+                    matches = exact_name
+    if len(matches) == 0:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy thửa đất '{identifier}'.")
+    if len(matches) > 1:
+        raise HTTPException(status_code=409, detail=f"Mã hoặc tên thửa '{identifier}' không duy nhất; hãy dùng mã thửa.")
+
+    target_idx = matches[0]
+    target = parcels.loc[target_idx]
+    others = parcels.drop(index=target_idx).copy()
+    if others.empty:
+        return {"tong_so": 0, "parcel_ids": [], "du_lieu": [], "thua_goc": str(target.get("parcel_code") or target.get("ten") or identifier)}
+
+    others["khoang_cach_m"] = others.geometry.distance(target.geometry).round(2)
+    n = max(1, min(int(so_luong or 1), len(others)))
+    nearest = others.sort_values("khoang_cach_m").head(n)
+    cols = [c for c in nearest.columns if c not in ["geometry", "_search_text"]]
+    records = nearest[cols].fillna("").to_dict(orient="records")
+    target_label = target.get("ten") or target.get("name") or target.get("parcel_code") or identifier
+    return {
+        "thua_goc": str(target_label),
+        "thua_goc_id": str(target.get("parcel_code") or target.get("id") or ""),
+        "tong_so": len(records),
+        "parcel_ids": _parcel_ids(nearest),
+        "du_lieu": records,
     }
 
 

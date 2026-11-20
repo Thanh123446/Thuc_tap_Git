@@ -298,9 +298,11 @@ from gis_service import (
     load_geojson_features,
     loc_thua as gis_loc_thua, 
     thong_tin_thua as gis_thong_tin_thua,
-    thua_cuc_tri as gis_thua_cuc_tri, 
+    thua_cuc_tri as gis_thua_cuc_tri,
+    thua_cuc_tri_nhieu as gis_thua_cuc_tri_nhieu, 
     tinh_tong_dien_tich as gis_tinh_tong_dien_tich,
-    thua_gan as gis_thua_gan, 
+    thua_gan as gis_thua_gan,
+    thua_gan_nhat as gis_thua_gan_nhat, 
     khoang_cach as gis_khoang_cach,
     tim_vi_tri_doi_tuong as gis_tim_vi_tri_doi_tuong,
 )
@@ -336,7 +338,7 @@ def parcel_to_feature(parcel: models.Parcel, include_user: bool = False) -> dict
 
 def refresh_gis_cache(db: Session) -> None:
     features = [
-        parcel_to_feature(parcel)
+        parcel_to_feature(parcel, include_user=True)
         for parcel in db.query(models.Parcel).order_by(models.Parcel.id.asc()).all()
     ]
     # Thêm các đối tượng điểm (giếng, nhà kho) từ CSDL vào cache bản đồ
@@ -2139,14 +2141,19 @@ async def _send_gemini_message(
                                 json.dumps(diagnostic_arguments, ensure_ascii=False, sort_keys=True),
                             )
                     if allowed_codes is not None:
-                        if function_name in ("tool_khoang_cach", "tool_tim_vi_tri_doi_tuong"):
-                            raise ValueError("Tra cứu đối tượng/khoảng cách hệ thống chỉ dành cho Admin.")
-                        if function_name == "tool_tinh_tong_dien_tich":
+                        if function_name == "tool_tim_vi_tri_doi_tuong":
+                            # cho phép tìm vị trí thửa của user; kết quả lọc bên dưới
+                            pass
+                        elif function_name == "tool_khoang_cach":
+                            # cho phép tính khoảng cách giữa thửa của user; kiểm tra sau khi có kết quả
+                            pass
+                        elif function_name == "tool_tinh_tong_dien_tich":
                             ds = function_arguments.get("danh_sach_thua")
                             if ds:
                                 filtered_ds = [p for p in ds if str(p).strip().upper() in allowed_codes]
                                 if not filtered_ds:
-                                    raise ValueError("Không tìm thấy thửa phù hợp trong phạm vi thửa của bạn.")
+                                    # có thể là tên thửa, để GIS resolve rồi scope lọc
+                                    filtered_ds = ds
                                 function_arguments["danh_sach_thua"] = filtered_ds
                             else:
                                 if not allowed_codes:
@@ -2164,7 +2171,28 @@ async def _send_gemini_message(
                             timeout=tool_timeout,
                         )
                     )
-                    if allowed_codes is not None and function_name in GIS_EVIDENCE_TOOLS:
+                    if allowed_codes is not None and function_name == "tool_khoang_cach":
+                        try:
+                            parsed_result = json.loads(result)
+                            if isinstance(parsed_result, dict):
+                                ids = [str(p).strip().upper() for p in (parsed_result.get("parcel_ids") or [])]
+                                if len(ids) < 2 or not all(i in allowed_codes for i in ids):
+                                    raise ValueError("Chỉ được tra cứu khoảng cách giữa các thửa của bạn.")
+                        except (TypeError, ValueError, json.JSONDecodeError) as e:
+                            if isinstance(e, ValueError) and "Chỉ được tra cứu" in str(e):
+                                raise
+                    if allowed_codes is not None and function_name == "tool_tim_vi_tri_doi_tuong":
+                        try:
+                            parsed_result = json.loads(result)
+                            # tim_vi_tri_doi_tuong trả về system objects; với user thường chỉ cho phép nếu là thửa
+                            if isinstance(parsed_result, dict):
+                                # system object results have no parcel ownership; block for non-admin
+                                # but if user asked for their parcel by name, tool_tim_vi_tri_doi_tuong won't find it in objects
+                                # so we need to fallback - handled by direct GIS; here block system objects
+                                raise ValueError("Tra cứu vị trí đối tượng hệ thống chỉ dành cho Admin. Hãy hỏi theo tên/mã thửa của bạn.")
+                        except (TypeError, json.JSONDecodeError):
+                            pass
+                    if allowed_codes is not None and function_name in GIS_EVIDENCE_TOOLS and function_name not in ("tool_khoang_cach", "tool_tim_vi_tri_doi_tuong"):
                         try:
                             parsed_result = json.loads(result)
                             if isinstance(parsed_result, dict):
@@ -2237,7 +2265,7 @@ class ChatRequest(BaseModel):
     force_gemini: bool = False
 
 
-def _format_direct_gis_result(result: dict, operation: str) -> tuple[str, list[str]]:
+def _format_direct_gis_result(result: dict, operation: str, is_admin: bool = False) -> tuple[str, list[str]]:
     parcel_ids = list(
         dict.fromkeys(
             str(item).strip()
@@ -2284,11 +2312,61 @@ def _format_direct_gis_result(result: dict, operation: str) -> tuple[str, list[s
             humidity = item.get("do_am", item.get("do_am_pct", item.get("humidity")))
             if humidity not in (None, ""):
                 details.append(f"độ ẩm {humidity}%")
+            if is_admin:
+                owner = item.get("user_full_name") or item.get("user_username") or (f"User #{item.get('user_id')}" if item.get('user_id') not in (None, '') else None)
+                if owner:
+                    details.append(f"chủ thửa: {owner}")
             suffix = f" — {', '.join(details)}" if details else ""
             identifier = f" (ID: {parcel_id})" if parcel_id else ""
             lines.append(f"- {label}{identifier}{suffix}")
         return "\n".join(lines), parcel_ids
     data = result.get("du_lieu", {})
+    if operation == "extreme":
+        field_labels = {
+            "dien_tich_m2": "diện tích",
+            "do_am": "độ ẩm",
+            "do_am_pct": "độ ẩm",
+            "humidity": "độ ẩm",
+            "nhiet_do": "nhiệt độ",
+            "temperature": "nhiệt độ",
+        }
+        field_label = field_labels.get(result.get("truong"), result.get("truong", "giá trị"))
+        extreme_label = "lớn nhất" if result.get("loai") == "MAX" else "nhỏ nhất"
+        records = data if isinstance(data, list) else ([data] if isinstance(data, dict) and data else [])
+        if not records:
+            return f"Không tìm thấy thửa có {field_label} {extreme_label} trong phạm vi tra cứu.", parcel_ids
+        if len(records) == 1:
+            item = records[0] if isinstance(records[0], dict) else {}
+            label = item.get("ten") or item.get("name") or item.get("id", "thửa đất")
+            value = item.get(result.get("truong"))
+            value_text = f" ({value})" if value not in (None, "") else ""
+            pid = parcel_ids[0] if parcel_ids else (item.get("parcel_code") or item.get("id") or "N/A")
+            owner_text = ""
+            if is_admin:
+                owner = item.get("user_full_name") or item.get("user_username") or (f"User #{item.get('user_id')}" if item.get("user_id") not in (None, "") else None)
+                if owner:
+                    owner_text = f", chủ thửa: {owner}"
+            return (
+                f"🌾 Thửa có {field_label} {extreme_label}: {label}{value_text} (ID: {pid}{owner_text}).",
+                parcel_ids,
+            )
+        lines = [f"🌾 {len(records)} thửa có {field_label} {extreme_label}:"]
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("ten") or item.get("name") or item.get("id", "thửa đất")
+            value = item.get(result.get("truong"))
+            value_text = f": {value}" if value not in (None, "") else ""
+            pid = item.get("parcel_code") or item.get("id") or ""
+            pid_text = f" (ID: {pid})" if pid else ""
+            owner_text = ""
+            if is_admin:
+                owner = item.get("user_full_name") or item.get("user_username") or (f"User #{item.get('user_id')}" if item.get("user_id") not in (None, "") else None)
+                if owner:
+                    owner_text = f", chủ thửa: {owner}"
+            lines.append(f"- {label}{pid_text}{value_text}{owner_text}")
+        return "\n".join(lines), parcel_ids
+
     if not isinstance(data, dict):
         data = {}
     if operation == "parcel":
@@ -2303,6 +2381,10 @@ def _format_direct_gis_result(result: dict, operation: str) -> tuple[str, list[s
         parcel_id = first_value("id", "parcel_code") or (parcel_ids[0] if parcel_ids else None)
         if parcel_id:
             lines.append(f"- Mã thửa: {parcel_id}")
+        if is_admin:
+            owner = first_value("user_full_name", "user_username") or (f"User #{data.get('user_id')}" if data.get("user_id") not in (None, "") else None)
+            if owner:
+                lines.append(f"- Chủ thửa: {owner}")
         crop = first_value("cay_trong", "loai_nong_san", "crop_type")
         if crop:
             lines.append(f"- Cây trồng: {crop}")
@@ -2455,10 +2537,12 @@ def _direct_gis_intents(normalized: str) -> set[str]:
     if "tong dien tich" in normalized:
         intents.add("area")
     if (
-        any(marker in normalized for marker in ("lon nhat", "nho nhat", "cao nhat", "thap nhat", "kho nhat"))
-        and any(marker in normalized for marker in ("dien tich", "do am", "nhiet do", "kho nhat"))
+        any(marker in normalized for marker in ("lon nhat", "nho nhat", "cao nhat", "thap nhat", "kho nhat", "rong nhat", "hep nhat", "to nhat", "be nhat"))
+        and any(marker in normalized for marker in ("dien tich", "do am", "nhiet do", "kho nhat", "thua", "rong", "hep", "to", "be"))
     ):
         intents.add("extreme")
+    if "gan" in normalized and "thua" in normalized and ("nhat" in normalized or "nat" in normalized or re.search(r"gan\s+(?:thua|t\s*\d)", normalized)) and "khoang cach" not in normalized:
+        intents.add("near")
     if (
         _extract_crop_filter(normalized)
         and "tong dien tich" not in normalized
@@ -2469,22 +2553,54 @@ def _direct_gis_intents(normalized: str) -> set[str]:
     return intents
 
 
+def _extract_extreme_count(normalized: str) -> int:
+    """Trích số lượng thửa cần lấy cho câu hỏi cực trị (vd: 'hai thửa nhỏ nhất' -> 2)."""
+    m = re.search(r"\b(\d+)\s+thua\b", normalized)
+    if m:
+        try:
+            n = int(m.group(1))
+            if 1 <= n <= 20:
+                return n
+        except Exception:
+            pass
+    word_map = {
+        "mot": 1, "hai": 2, "ba": 3, "bon": 4, "nam": 5,
+        "sau": 6, "bay": 7, "tam": 8, "chin": 9, "muoi": 10,
+    }
+    m = re.search(r"\b(mot|hai|ba|bon|nam|sau|bay|tam|chin|muoi)\s+thua\b", normalized)
+    if m:
+        return word_map.get(m.group(1), 1)
+    return 1
+
+
 def _requested_extreme_operations(normalized: str) -> list[tuple[str, str]]:
     fields = [
         (match.start(), field)
         for marker, field in (
             ("dien tich", "dien_tich"),
+            ("rong", "dien_tich"),
+            ("to", "dien_tich"),
+            ("hep", "dien_tich"),
+            ("be", "dien_tich"),
             ("do am", "do_am"),
             ("nhiet do", "nhiet_do"),
         )
         if (match := re.search(re.escape(marker), normalized))
     ]
-    fields.sort()
+    # loại trùng field theo loại (giữ vị trí đầu)
+    seen_fields = set()
+    uniq_fields = []
+    for pos, field in sorted(fields):
+        if field not in seen_fields:
+            uniq_fields.append((pos, field))
+            seen_fields.add(field)
+    fields = uniq_fields
+
     directions = [
         (match.start(), kind)
         for pattern, kind in (
-            (r"\b(?:lon nhat|cao nhat)\b", "max"),
-            (r"\b(?:nho nhat|thap nhat)\b", "min"),
+            (r"\b(?:lon nhat|cao nhat|rong nhat|to nhat)\b", "max"),
+            (r"\b(?:nho nhat|thap nhat|hep nhat|be nhat)\b", "min"),
             (r"\bkho nhat\b", "min"),
             (r"\bam nhat\b", "min"),
         )
@@ -2494,6 +2610,9 @@ def _requested_extreme_operations(normalized: str) -> list[tuple[str, str]]:
         fields.append((normalized.index("kho nhat"), "do_am"))
         fields.sort()
     if not fields or not directions:
+        # Mặc định hiểu "thửa lớn/nhỏ/rộng/hẹp nhất" là theo diện tích nếu không nêu trường
+        if directions and not fields and "thua" in normalized:
+            return [("dien_tich", kind) for _, kind in directions]
         return []
 
     kinds = {kind for _, kind in directions}
@@ -2521,7 +2640,7 @@ def _requested_extreme_operations(normalized: str) -> list[tuple[str, str]]:
     return operations
 
 
-def _try_direct_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = None) -> Optional[tuple[str, list[str]]]:
+def _try_direct_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = None, is_admin: bool = False) -> Optional[tuple[str, list[str]]]:
     """Handle unambiguous GIS questions without an unnecessary Gemini round-trip."""
     normalized = clean_text(message)
     if not normalized:
@@ -2530,6 +2649,9 @@ def _try_direct_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
     allowed_codes = None
     if user_parcel_codes is not None:
         allowed_codes = set(c.strip().upper() for c in user_parcel_codes if c)
+
+    def fmt(result: dict, operation: str):
+        return _format_direct_gis_result(result, operation, is_admin=is_admin)
 
     def scope(result: dict) -> dict:
         if allowed_codes is None:
@@ -2543,10 +2665,31 @@ def _try_direct_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
     if any(marker in normalized for marker in ("thong tin", "chi tiet", "du lieu cua")):
         identifiers = _extract_direct_parcel_identifiers(message)
         if len(identifiers) == 1:
-            return _format_direct_gis_result(
+            return fmt(
                 scope(gis_thong_tin_thua(identifiers[0])),
                 "parcel",
             )
+        # Thử trích xuất tên/mã thửa dạng văn bản (vd: "thông tin thửa Nam")
+        name_match = re.search(
+            r"(?:thong tin|chi tiet|du lieu cua)\s+(?:cua\s+)?(?:thua(?:\s+dat)?(?:\s+so)?(?:\s+thu)?)\s+(.+?)(?:\s*[?.!,]?\s*$)",
+            normalized,
+        )
+        if name_match:
+            name_id = name_match.group(1).strip()
+            # Bỏ từ đệm cuối câu thường gặp
+            name_id = re.sub(r"\s+(di|nhe|nha|voi|a|dum|giup|toi|minh|ban|oi|khong|ko)$", "", name_id).strip()
+            # Bỏ qua nếu chỉ là số (đã xử lý ở trên) hoặc quá ngắn/rỗng
+            if name_id and not re.fullmatch(r"\d+", name_id):
+                try:
+                    result = gis_thong_tin_thua(name_id)
+                    scoped = scope(result)
+                    # Nếu lọc theo user làm rỗng kết quả, báo không tìm thấy trong phạm vi
+                    data = scoped.get("du_lieu")
+                    if allowed_codes is not None and (not data or (isinstance(data, dict) and not data)):
+                        return ("Không tìm thấy thửa phù hợp trong phạm vi thửa của bạn.", [])
+                    return fmt(scoped, "parcel")
+                except HTTPException:
+                    return None
 
     if any(marker in normalized for marker in ("o dau", "vi tri", "toa do")):
         keyword = None
@@ -2557,12 +2700,32 @@ def _try_direct_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
         if keyword:
             if allowed_codes is not None:
                 return ("Tra cứu vị trí đối tượng hệ thống chỉ dành cho Admin.", [])
-            return _format_direct_gis_result(gis_tim_vi_tri_doi_tuong(keyword), "location")
+            return fmt(gis_tim_vi_tri_doi_tuong(keyword), "location")
+        # Vị trí thửa của user
+        if allowed_codes is not None:
+            # thử tìm tên thửa trong câu
+            identifiers = _extract_direct_parcel_identifiers(message)
+            name_id = identifiers[0] if len(identifiers) == 1 else None
+            if not name_id:
+                m = re.search(r"(?:o dau|vi tri|toa do)\s+(?:cua\s+)?(?:thua(?:\s+dat)?(?:\s+so)?(?:\s+thu)?)\s*(.+?)(?:\s*[?.!,]?\s*$)", normalized)
+                if m:
+                    name_id = m.group(1).strip()
+                    name_id = re.sub(r"\s+(di|nhe|nha|voi|a|dum|giup|toi|minh|ban|oi|khong|ko)$", "", name_id).strip()
+            if name_id:
+                try:
+                    result = gis_thong_tin_thua(name_id)
+                    scoped = scope(result)
+                    data = scoped.get("du_lieu")
+                    if not data or (isinstance(data, dict) and not data):
+                        return ("Không tìm thấy thửa phù hợp trong phạm vi thửa của bạn.", [])
+                    return fmt(scoped, "parcel")
+                except HTTPException:
+                    return None
 
     crop_filter = _extract_crop_filter(normalized)
     if "filter" in intents and crop_filter:
         humidity_min, humidity_max = _extract_humidity_limits(normalized)
-        return _format_direct_gis_result(
+        return fmt(
             scope(gis_loc_thua(
                 cay_trong=crop_filter,
                 do_am_toi_thieu=humidity_min,
@@ -2571,17 +2734,38 @@ def _try_direct_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
             "filter",
         )
 
-    distance_match = re.search(r"(?:tu|giua)\s+(.+?)\s+(?:den|va)\s+(.+?)(?:\?|$)", normalized)
+    distance_match = re.search(r"(?:tu|giua)\s+(.+?)\s+(?:den|de|toi|va)\s+(.+?)(?:\?|$)", normalized)
     if "khoang cach" in normalized and distance_match:
-        if allowed_codes is not None:
-            return ("Tra cứu khoảng cách đối tượng hệ thống chỉ dành cho Admin.", [])
-        return _format_direct_gis_result(
-            gis_khoang_cach(distance_match.group(1).strip(), distance_match.group(2).strip()),
-            "distance",
-        )
+        try:
+            result = gis_khoang_cach(distance_match.group(1).strip(), distance_match.group(2).strip())
+            if allowed_codes is not None:
+                ids = [str(p).strip().upper() for p in (result.get("parcel_ids") or [])]
+                if len(ids) < 2 or not all(i in allowed_codes for i in ids):
+                    return ("Chỉ được tra cứu khoảng cách giữa các thửa của bạn.", [])
+            return fmt(result, "distance")
+        except HTTPException:
+            return None
 
     if "tong dien tich" in normalized:
         identifiers = _extract_direct_parcel_identifiers(message)
+        if not identifiers:
+            # Thử trích xuất tên thửa: "thửa Nam và thửa Cân"
+            parts = re.split(r"\s+va\s+|,\s*", normalized)
+            name_ids = []
+            for part in parts:
+                m = re.search(r"\bthua\s+(?:dat\s+)?(?:so\s+)?(.+)", part.strip())
+                if m:
+                    name = m.group(1).strip()
+                    name = re.sub(r"\s+(di|nhe|nha|voi|a|dum|giup|toi|minh|ban|oi|khong|ko)$", "", name).strip()
+                    if not name or re.fullmatch(r"\d+", name):
+                        continue
+                    # bỏ qua nếu là tên loại cây trồng (lọc theo cây)
+                    if _extract_crop_filter(clean_text(name)):
+                        continue
+                    name_ids.append(name)
+            # chỉ dùng tên thửa khi có dấu hiệu liệt kê cụ thể (nhiều thửa hoặc "và thửa"/", thửa")
+            if name_ids and (len(name_ids) > 1 or re.search(r"\bva\s+thua\b|,\s*thua\b", normalized)):
+                identifiers = name_ids
         if not identifiers and re.search(r"\b\d+\s+thua\b", normalized):
             quantity = re.search(r"\b(\d+)\s+thua\b", normalized)
             quantity_text = quantity.group(1) if quantity else "các"
@@ -2594,36 +2778,72 @@ def _try_direct_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
         if allowed_codes is not None:
             if identifiers:
                 area_args["danh_sach_thua"] = [i for i in identifiers if str(i).strip().upper() in allowed_codes]
+                # tên thửa không khớp parcel_code -> giữ lại để GIS tìm theo tên, scope sẽ lọc
                 if not area_args["danh_sach_thua"]:
-                    return ("Không tìm thấy thửa phù hợp trong phạm vi thửa của bạn.", [])
+                    area_args["danh_sach_thua"] = identifiers
             else:
                 area_args["danh_sach_thua"] = list(allowed_codes)
                 if not area_args["danh_sach_thua"]:
                     return ("Bạn chưa có thửa đất nào để tính diện tích.", [])
-        return _format_direct_gis_result(
+        return fmt(
             scope(gis_tinh_tong_dien_tich(**area_args)),
             "area",
         )
+
+    if "near" in intents:
+        m = re.search(r"(?:gan\s+(?:nha?t?\s+)?(?:voi\s+|cua\s+)?thua|thua\s+gan\s+(?:nha?t?\s+)?(?:voi\s+|cua\s+)?thua)\s+(?:dat\s+)?(?:so\s+)?(.+?)(?:\s+nha?t)?(?:\s*[?.!,]?\s*$)", normalized)
+        if not m:
+            m = re.search(r"gan\s+(?:nha?t?\s+)?(?:voi\s+|cua\s+)?(.+?)(?:\s*[?.!,]?\s*$)", normalized)
+        if m:
+            name = m.group(1).strip()
+            name = re.sub(r"^(?:thua\s+(?:dat\s+)?(?:so\s+)?)+", "", name).strip()
+            name = re.sub(r"\s+(di|nhe|nha|voi|a|dum|giup|toi|minh|ban|oi|khong|ko|nhat|nat)$", "", name).strip()
+            name = re.sub(r"\s+(nhat|nat)$", "", name).strip()
+            if name:
+                try:
+                    result = gis_thua_gan_nhat(name, so_luong=1)
+                    if allowed_codes is not None:
+                        result = _filter_gis_result_by_codes(result, allowed_codes)
+                    records = result.get("du_lieu") if isinstance(result, dict) else None
+                    if not records:
+                        return ("Không tìm thấy thửa gần phù hợp trong phạm vi thửa của bạn.", [])
+                    lines = [f"🗺️ Thửa gần thửa {result.get('thua_goc', name)} nhất:"]
+                    for item in records:
+                        label = item.get("ten") or item.get("parcel_code") or item.get("id", "Thửa")
+                        dist = item.get("khoang_cach_m")
+                        pid = item.get("parcel_code") or item.get("id") or ""
+                        extra = f" (ID: {pid})" if pid else ""
+                        dist_txt = f" — cách {dist} m" if dist not in (None, "") else ""
+                        owner_txt = ""
+                        if is_admin:
+                            owner = item.get("user_full_name") or item.get("user_username") or (f"User #{item.get('user_id')}" if item.get("user_id") not in (None, "") else None)
+                            if owner:
+                                owner_txt = f", chủ thửa: {owner}"
+                        lines.append(f"- {label}{extra}{dist_txt}{owner_txt}")
+                    parcel_ids = [str(p).strip() for p in (result.get("parcel_ids") or []) if str(p).strip()][:MAX_GEMINI_PARCEL_IDS]
+                    return "\n".join(lines), filter_parcel_ids_for_user(parcel_ids, user_parcel_codes)
+                except HTTPException:
+                    return None
 
     if "extreme" in intents:
         requested_operations = _requested_extreme_operations(normalized)
         if not requested_operations:
             return None
-        results = [
-            _format_direct_gis_result(scope(gis_thua_cuc_tri(field, kind)), "extreme")
-            for field, kind in requested_operations
-        ]
-        reply = "\n".join(result[0] for result in results)
-        parcel_ids = list(dict.fromkeys(
-            parcel_id
-            for _, ids in results
-            for parcel_id in ids
-        ))[:MAX_GEMINI_PARCEL_IDS]
+        count = _extract_extreme_count(normalized)
+        results = []
+        for field, kind in requested_operations:
+            if count > 1:
+                result = scope(gis_thua_cuc_tri_nhieu(field, kind, so_luong=count))
+            else:
+                result = scope(gis_thua_cuc_tri(field, kind))
+            results.append(fmt(result, "extreme"))
+        reply = "\n".join(r[0] for r in results)
+        parcel_ids = list(dict.fromkeys(pid for _, ids in results for pid in ids))[:MAX_GEMINI_PARCEL_IDS]
         return reply, parcel_ids
     return None
 
 
-def _try_system_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = None) -> Optional[tuple[str, list[str]]]:
+def _try_system_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = None, is_admin: bool = False) -> Optional[tuple[str, list[str]]]:
     """Answer compound requests when Gemini is unavailable, using only supported GIS data."""
     normalized = clean_text(message)
     intents = _direct_gis_intents(normalized)
@@ -2639,6 +2859,9 @@ def _try_system_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
             return result
         return _filter_gis_result_by_codes(result, allowed_codes)
 
+    def fmt(result: dict, operation: str):
+        return _format_direct_gis_result(result, operation, is_admin=is_admin)
+
     replies = []
     parcel_ids = []
 
@@ -2648,45 +2871,91 @@ def _try_system_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
             return None
         for identifier in identifiers:
             result = scope(gis_thong_tin_thua(identifier))
-            reply, ids = _format_direct_gis_result(result, "parcel")
+            reply, ids = fmt(result, "parcel")
             replies.append(reply)
             parcel_ids.extend(ids)
 
     if "location" in intents:
         if allowed_codes is not None:
-            return ("Tra cứu vị trí đối tượng hệ thống chỉ dành cho Admin.", [])
-        if not any(marker in normalized for marker in ("gieng", "nha kho", "kho")):
-            return None
-        location_keywords = []
-        if "gieng" in normalized:
-            location_keywords.append("gieng")
-        if any(marker in normalized for marker in ("nha kho", "kho")):
-            location_keywords.append("nha kho")
-        for keyword in location_keywords:
-            result = gis_tim_vi_tri_doi_tuong(keyword)
-            reply, ids = _format_direct_gis_result(result, "location")
-            replies.append(reply)
-            parcel_ids.extend(ids)
+            # thử tìm vị trí thửa của user
+            identifiers = _extract_direct_parcel_identifiers(message)
+            name_id = identifiers[0] if len(identifiers) == 1 else None
+            if not name_id and not any(marker in normalized for marker in ("gieng", "nha kho", "kho")):
+                m = re.search(r"(?:o dau|vi tri|toa do)\s+(?:cua\s+)?(?:thua(?:\s+dat)?(?:\s+so)?(?:\s+thu)?)\s*(.+?)(?:\s*[?.!,]?\s*$)", normalized)
+                if m:
+                    name_id = m.group(1).strip()
+                    name_id = re.sub(r"\s+(di|nhe|nha|voi|a|dum|giup|toi|minh|ban|oi|khong|ko)$", "", name_id).strip()
+            if name_id:
+                try:
+                    result = scope(gis_thong_tin_thua(name_id))
+                    data = result.get("du_lieu")
+                    if not data or (isinstance(data, dict) and not data):
+                        replies.append("Không tìm thấy thửa phù hợp trong phạm vi thửa của bạn.")
+                        parcel_ids.extend([])
+                    else:
+                        reply, ids = fmt(result, "parcel")
+                        replies.append(reply)
+                        parcel_ids.extend(ids)
+                except HTTPException:
+                    return None
+            elif not any(marker in normalized for marker in ("gieng", "nha kho", "kho")):
+                return None
+            # nếu hỏi giếng/nhà kho -> chặn
+            if any(marker in normalized for marker in ("gieng", "nha kho", "kho")):
+                return ("Tra cứu vị trí đối tượng hệ thống chỉ dành cho Admin.", [])
+        else:
+            if not any(marker in normalized for marker in ("gieng", "nha kho", "kho")):
+                return None
+            location_keywords = []
+            if "gieng" in normalized:
+                location_keywords.append("gieng")
+            if any(marker in normalized for marker in ("nha kho", "kho")):
+                location_keywords.append("nha kho")
+            for keyword in location_keywords:
+                result = gis_tim_vi_tri_doi_tuong(keyword)
+                reply, ids = fmt(result, "location")
+                replies.append(reply)
+                parcel_ids.extend(ids)
 
     if "distance" in intents:
-        if allowed_codes is not None:
-            return ("Tra cứu khoảng cách đối tượng hệ thống chỉ dành cho Admin.", [])
         distance_match = re.search(
-            r"(?:tu|giua)\s+(.+?)\s+(?:den|va)\s+(.+?)(?:\?|$)",
+            r"(?:tu|giua)\s+(.+?)\s+(?:den|de|toi|va)\s+(.+?)(?:\?|$)",
             normalized,
         )
         if not distance_match:
             return None
-        result = gis_khoang_cach(
-            distance_match.group(1).strip(),
-            distance_match.group(2).strip(),
-        )
-        reply, ids = _format_direct_gis_result(result, "distance")
-        replies.append(reply)
-        parcel_ids.extend(ids)
+        try:
+            result = gis_khoang_cach(
+                distance_match.group(1).strip(),
+                distance_match.group(2).strip(),
+            )
+            if allowed_codes is not None:
+                ids = [str(p).strip().upper() for p in (result.get("parcel_ids") or [])]
+                if len(ids) < 2 or not all(i in allowed_codes for i in ids):
+                    return ("Chỉ được tra cứu khoảng cách giữa các thửa của bạn.", [])
+            reply, ids = fmt(result, "distance")
+            replies.append(reply)
+            parcel_ids.extend(ids)
+        except HTTPException:
+            return None
 
     if "area" in intents:
         identifiers = _extract_direct_parcel_identifiers(message)
+        if not identifiers:
+            parts = re.split(r"\s+va\s+|,\s*", normalized)
+            name_ids = []
+            for part in parts:
+                m = re.search(r"\bthua\s+(?:dat\s+)?(?:so\s+)?(.+)", part.strip())
+                if m:
+                    name = m.group(1).strip()
+                    name = re.sub(r"\s+(di|nhe|nha|voi|a|dum|giup|toi|minh|ban|oi|khong|ko)$", "", name).strip()
+                    if not name or re.fullmatch(r"\d+", name):
+                        continue
+                    if _extract_crop_filter(clean_text(name)):
+                        continue
+                    name_ids.append(name)
+            if name_ids and (len(name_ids) > 1 or re.search(r"\bva\s+thua\b|,\s*thua\b", normalized)):
+                identifiers = name_ids
         if not identifiers and re.search(r"\b\d+\s+thua\b", normalized):
             quantity = re.search(r"\b(\d+)\s+thua\b", normalized)
             quantity_text = quantity.group(1) if quantity else "các"
@@ -2700,13 +2969,13 @@ def _try_system_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
             if identifiers:
                 area_args["danh_sach_thua"] = [i for i in identifiers if str(i).strip().upper() in allowed_codes]
                 if not area_args["danh_sach_thua"]:
-                    return ("Không tìm thấy thửa phù hợp trong phạm vi thửa của bạn.", [])
+                    area_args["danh_sach_thua"] = identifiers
             else:
                 area_args["danh_sach_thua"] = list(allowed_codes)
                 if not area_args["danh_sach_thua"]:
                     return ("Bạn chưa có thửa đất nào để tính diện tích.", [])
         result = scope(gis_tinh_tong_dien_tich(**area_args))
-        reply, ids = _format_direct_gis_result(result, "area")
+        reply, ids = fmt(result, "area")
         replies.append(reply)
         parcel_ids.extend(ids)
 
@@ -2714,9 +2983,13 @@ def _try_system_gis_chat(message: str, user_parcel_codes: Optional[list[str]] = 
         requested_operations = _requested_extreme_operations(normalized)
         if not requested_operations:
             return None
+        count = _extract_extreme_count(normalized)
         for field, kind in requested_operations:
-            result = scope(gis_thua_cuc_tri(field, kind))
-            reply, ids = _format_direct_gis_result(result, "extreme")
+            if count > 1:
+                result = scope(gis_thua_cuc_tri_nhieu(field, kind, so_luong=count))
+            else:
+                result = scope(gis_thua_cuc_tri(field, kind))
+            reply, ids = fmt(result, "extreme")
             replies.append(reply)
             parcel_ids.extend(ids)
 
@@ -2761,6 +3034,7 @@ def _try_contextual_gis_fallback(
     message: str,
     history: list["ChatTurn"],
     user_parcel_codes: Optional[list[str]] = None,
+    is_admin: bool = False,
 ) -> Optional[tuple[str, list[str]]]:
     """Resolve follow-up parcel questions from the prior assistant turn's selected parcels."""
     normalized = clean_text(message)
@@ -2822,6 +3096,10 @@ def _try_contextual_gis_fallback(
         selected_ids.extend(result.get("parcel_ids", [parcel_id]))
         parcel_name = data.get("ten") or data.get("name") or parcel_id
         lines.append(f"🌾 Theo câu trước, {parcel_name} ({parcel_id}):")
+        if is_admin:
+            owner = data.get("user_full_name") or data.get("user_username") or (f"User #{data.get('user_id')}" if data.get("user_id") not in (None, "") else None)
+            if owner:
+                lines.append(f"- Chủ thửa: {owner}")
         for label, keys, unit in requested_fields:
             value = next(
                 (data[key] for key in keys if data.get(key) not in (None, "")),
@@ -2847,6 +3125,7 @@ def _system_fallback_reply(
     image_attached: bool,
     history: Optional[list["ChatTurn"]] = None,
     user_parcel_codes: Optional[list[str]] = None,
+    is_admin: bool = False,
 ) -> tuple[str, list[str]]:
     warning = "⚠ Gemini hiện không khả dụng; hệ thống đang trả lời bằng chế độ dự phòng."
     if image_attached:
@@ -2857,7 +3136,7 @@ def _system_fallback_reply(
         )
 
     try:
-        contextual_result = _try_contextual_gis_fallback(message, history or [], user_parcel_codes=user_parcel_codes)
+        contextual_result = _try_contextual_gis_fallback(message, history or [], user_parcel_codes=user_parcel_codes, is_admin=is_admin)
     except HTTPException as error:
         return (
             f"{warning}\nTra cứu dữ liệu hội thoại trước chưa thành công: {error.detail}",
@@ -2868,7 +3147,7 @@ def _system_fallback_reply(
         return f"{warning}\n{reply}", parcel_ids
 
     try:
-        direct_result = _try_direct_gis_chat(message, user_parcel_codes=user_parcel_codes)
+        direct_result = _try_direct_gis_chat(message, user_parcel_codes=user_parcel_codes, is_admin=is_admin)
     except HTTPException as error:
         return (
             f"{warning}\nTra cứu dữ liệu nội bộ chưa thành công: {error.detail}",
@@ -2879,7 +3158,7 @@ def _system_fallback_reply(
         return f"{warning}\n{reply}", parcel_ids
 
     try:
-        system_gis_result = _try_system_gis_chat(message, user_parcel_codes=user_parcel_codes)
+        system_gis_result = _try_system_gis_chat(message, user_parcel_codes=user_parcel_codes, is_admin=is_admin)
     except HTTPException as error:
         return (
             f"{warning}\nTra cứu dữ liệu nội bộ chưa thành công: {error.detail}",
@@ -2912,12 +3191,14 @@ def _return_system_fallback(
     tool_calls: Optional[list[dict[str, object]]] = None,
     elapsed_seconds: Optional[float] = None,
     user_parcel_codes: Optional[list[str]] = None,
+    is_admin: bool = False,
 ) -> dict:
     reply_text, parcel_ids = _system_fallback_reply(
         user_message,
         image_attached=image_attached,
         history=history,
         user_parcel_codes=user_parcel_codes,
+        is_admin=is_admin,
     )
     parcel_ids = filter_parcel_ids_for_user(parcel_ids, user_parcel_codes)
     background_tasks.add_task(
@@ -2959,16 +3240,9 @@ async def chat_endpoint(
 ):
     user_id = current_user.id
 
-    # Cho phép user thường tra cứu GIS nhưng chỉ trong phạm vi thửa của họ.
-    # Chặn tra cứu theo đối tượng/khoảng cách hệ thống (dữ liệu map objects) với non-admin.
-    if current_user.role != "admin":
-        selected_tools = _selected_gemini_tool_names(request.message)
-        restricted = selected_tools.intersection({"tool_khoang_cach", "tool_tim_vi_tri_doi_tuong"})
-        if restricted:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Tra cứu đối tượng/khoảng cách hệ thống chỉ dành cho Admin.",
-            )
+    # Cho phép user thường tra cứu GIS trong phạm vi thửa của họ.
+    # tool_khoang_cach/tool_tim_vi_tri_doi_tuong: cho phép (kết quả sẽ được lọc/kiểm tra theo thửa của user).
+    # Chặn gan_doi_tuong (đối tượng hệ thống) sẽ xử lý ở tầng tham số/kết quả.
 
     # Lấy danh sách mã thửa của user để lọc kết quả chat (user thường chỉ thấy thửa của mình)
     user_parcel_codes: Optional[list[str]] = None
@@ -2992,7 +3266,7 @@ async def chat_endpoint(
         and not has_contextual_parcel_followup
     ):
         try:
-            direct_result = _try_direct_gis_chat(request.message, user_parcel_codes=user_parcel_codes)
+            direct_result = _try_direct_gis_chat(request.message, user_parcel_codes=user_parcel_codes, is_admin=(current_user.role == "admin"))
         except HTTPException:
             direct_result = None
         if direct_result:
@@ -3031,6 +3305,7 @@ async def chat_endpoint(
             image_attached=bool(request.image_base64),
             history=request.history,
             user_parcel_codes=user_parcel_codes,
+            is_admin=(current_user.role == "admin"),
         )
     
     contents = []
@@ -3195,6 +3470,7 @@ async def chat_endpoint(
             tool_calls=tool_call_trace,
             elapsed_seconds=asyncio.get_running_loop().time() - request_started,
             user_parcel_codes=user_parcel_codes,
+            is_admin=(current_user.role == "admin"),
         )
 
     background_tasks.add_task(
@@ -3328,30 +3604,49 @@ def _filter_gis_result_for_user(result: dict, db: Session, user_id: int) -> dict
     return _filter_gis_result_by_codes(result, user_codes)
 
 
-def _filter_gis_result_by_codes(result: dict, user_codes: set[str]) -> dict:
+def _strip_owner_fields(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return item
+    cleaned = dict(item)
+    for key in ("user_full_name", "user_username", "user_id"):
+        cleaned.pop(key, None)
+    return cleaned
+
+
+def _filter_gis_result_by_codes(result: dict, user_codes: set[str], strip_owner: bool = True) -> dict:
     """Lọc kết quả GIS chỉ giữ lại các thửa có mã nằm trong user_codes."""
     if not isinstance(result, dict):
         return result
     result = dict(result)
 
+    def allowed_item(item: dict) -> bool:
+        for key in ("parcel_code", "id", "db_id"):
+            val = item.get(key)
+            if val is not None and str(val).strip().upper() in user_codes:
+                return True
+        return False
+
     def allowed_id(value) -> bool:
         return str(value or "").strip().upper() in user_codes
 
+    def sanitize(item: dict) -> dict:
+        return _strip_owner_fields(item) if strip_owner else item
+
     if isinstance(result.get("du_lieu"), list):
         result["du_lieu"] = [
-            item for item in result["du_lieu"]
-            if isinstance(item, dict) and allowed_id(item.get("id") or item.get("parcel_code"))
+            sanitize(item) for item in result["du_lieu"]
+            if isinstance(item, dict) and allowed_item(item)
         ]
         result["tong_so"] = len(result["du_lieu"])
     elif isinstance(result.get("du_lieu"), dict):
         item = result["du_lieu"]
-        item_id = item.get("id") or item.get("parcel_code")
-        if not allowed_id(item_id):
+        if not allowed_item(item):
             result["du_lieu"] = {}
             result["parcel_ids"] = []
             result["tong_so"] = 0
             result["tim_thay"] = False
         else:
+            result["du_lieu"] = sanitize(item)
             result["tim_thay"] = result.get("tim_thay", True)
 
     if isinstance(result.get("parcel_ids"), list):
@@ -3404,17 +3699,38 @@ def api_khoang_cach(
     dt1: str,
     dt2: str,
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    _require_admin_for_system_gis(current_user)
-    return gis_khoang_cach(dt1, dt2)
+    result = gis_khoang_cach(dt1, dt2)
+    if current_user.role != "admin":
+        allowed = set(c.strip().upper() for c in get_user_parcel_codes(db, current_user.id) if c)
+        ids = [str(p).strip().upper() for p in (result.get("parcel_ids") or [])]
+        # Chỉ cho phép nếu cả hai đối tượng đều là thửa của user
+        if len(ids) < 2 or not all(i in allowed for i in ids):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Chỉ được tra cứu khoảng cách giữa các thửa của bạn.",
+            )
+    return result
 
 @app.get("/api/vi-tri-doi-tuong")
 def api_tim_vi_tri_doi_tuong(
     tu_khoa: str = Query(..., min_length=1, max_length=100),
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    _require_admin_for_system_gis(current_user)
-    return gis_tim_vi_tri_doi_tuong(tu_khoa)
+    if current_user.role == "admin":
+        return gis_tim_vi_tri_doi_tuong(tu_khoa)
+    # User thường: tìm vị trí thửa của mình
+    try:
+        result = gis_thong_tin_thua(tu_khoa)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy thửa '{tu_khoa}' trong dữ liệu của bạn.")
+    result = _filter_gis_result_for_user(result, db, current_user.id)
+    data = result.get("du_lieu") if isinstance(result, dict) else None
+    if not data or (isinstance(data, dict) and not data):
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy thửa '{tu_khoa}' trong dữ liệu của bạn.")
+    return result
 
 
 # Lấy danh sách thửa của user hiện tại (admin có thể lọc theo user_id)
